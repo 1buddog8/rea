@@ -98,8 +98,9 @@ def selected_event(event):
 def _event_encoder():
     """Return iterencode(value, 0) whose joined chunks equal
     JSONEncoder(ensure_ascii=False).encode for objects, building the C encoder
-    once instead of on every call."""
-    encoder = json.JSONEncoder(ensure_ascii=False)
+    once instead of on every call. Values decoded from JSON text are never
+    circular, so the encoder skips circular-reference markers."""
+    encoder = json.JSONEncoder(ensure_ascii=False, check_circular=False)
     make = json.encoder.c_make_encoder
     if make is not None:
         args = (encoder.default, json.encoder.encode_basestring, None)
@@ -107,7 +108,7 @@ def _event_encoder():
                 encoder.sort_keys, encoder.skipkeys, encoder.allow_nan)
         for extra in ((), (float.__repr__,)):
             try:
-                return make({}, *args, *extra, *tail)
+                return make(None, *args, *extra, *tail)
             except TypeError:
                 continue
     return lambda value, _level: (encoder.encode(value),)
