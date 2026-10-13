@@ -584,14 +584,20 @@ def _breakpoint_report(target, created, config):
             if method_type != "any":
                 required_prefix = "-[" if method_type == "instance" else "+["
         for breakpoint in breakpoints:
-            for position in range(breakpoint.GetNumLocations()):
+            location_total = breakpoint.GetNumLocations()
+            for position in range(location_total):
+                if required_prefix is None and len(locations) >= MAX_REPORTED_LOCATIONS:
+                    # Nothing more can be reported; only the count changes.
+                    count += location_total - position
+                    break
                 address = breakpoint.GetLocationAtIndex(position).GetAddress()
                 entry = resolved.get(id(address))
                 if entry is None or entry[0] is not address:
-                    entry = resolved[id(address)] = (
+                    entry = resolved[id(address)] = [
                         address,
                         _location(address, target),
-                    )
+                        None,
+                    ]
                 location = entry[1]
                 if required_prefix is not None and not (
                     location["symbol"] or ""
@@ -603,17 +609,20 @@ def _breakpoint_report(target, created, config):
                         MAX_BREAKPOINT_LOCATION_BYTES - retained_location_bytes
                     )
                     # Locations repeat across breakpoints; size each one once.
-                    key = tuple(location.values())
-                    sizes = location_sizes.get(key)
+                    sizes = entry[2]
                     if sizes is None:
-                        estimate = _estimated_location_size(location)
-                        # json.dumps escapes non-ASCII, so characters are bytes.
-                        sizes = location_sizes[key] = (
-                            estimate,
-                            len(dumps(location))
-                            if estimate <= MAX_BREAKPOINT_LOCATION_BYTES
-                            else None,
-                        )
+                        key = tuple(location.values())
+                        sizes = location_sizes.get(key)
+                        if sizes is None:
+                            estimate = _estimated_location_size(location)
+                            # json.dumps escapes non-ASCII, so characters are bytes.
+                            sizes = location_sizes[key] = (
+                                estimate,
+                                len(dumps(location))
+                                if estimate <= MAX_BREAKPOINT_LOCATION_BYTES
+                                else None,
+                            )
+                        entry[2] = sizes
                     if sizes[0] > remaining_bytes:
                         locations_truncated = True
                         continue
