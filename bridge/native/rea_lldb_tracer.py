@@ -143,7 +143,11 @@ class _ObservationJournal:
 
     def append_json(self, text):
         """Append one row already serialized with json.dumps defaults."""
-        encoded = (text + "\n").encode("utf-8")
+        return self.append_line(text + "\n")
+
+    def append_line(self, line):
+        """append_json for a row already ending in its newline."""
+        encoded = line.encode("utf-8")
         if self.bytes + len(encoded) > self.max_bytes:
             return False
         self.handle.write(encoded)
@@ -349,57 +353,54 @@ def _frame_location(address, target):
     if names is None:
         names = _frame_module_names(module)
     symbol = address.GetSymbol()
-    file_address = address.GetFileAddress()
-    load_address = address.GetLoadAddress(target)
     key = (
-        load_address,
-        file_address,
-        names[1],
-        names[2],
+        address.GetLoadAddress(target),
+        address.GetFileAddress(),
         symbol.GetName() if symbol.IsValid() else None,
     )
-    entry = _FRAME_LOCATIONS.get(key)
+    entry = names[3].get(key)
     if entry is None:
-        entry = _new_frame_location(key)
+        entry = _new_frame_location(names, key)
     return entry
 
 
 def _frame_module_names(module):
-    """Memoise (module, filename, path) for a module not yet in _FRAME_MODULES."""
+    """Memoise (module, filename, path, locations) for a module not yet in
+    _FRAME_MODULES; locations holds its _frame_location entries."""
     if module.IsValid():
         file_spec = module.GetFileSpec()
-        names = (module, file_spec.GetFilename(), str(file_spec))
+        names = (module, file_spec.GetFilename(), str(file_spec), {})
     else:
-        names = (module, None, None)
+        names = (module, None, None, {})
     if len(_FRAME_MODULES) >= _LOCATION_SIZES_LIMIT:
         _FRAME_MODULES.clear()
     _FRAME_MODULES[id(module)] = names
     return names
 
 
-def _new_frame_location(key):
-    """Memoise the _frame_location entry for a key not yet in _FRAME_LOCATIONS."""
-    load_address, file_address, module_name, module_path, symbol_name = key
+def _new_frame_location(names, key):
+    """Memoise the _frame_location entry for a key not yet in names[3]."""
+    load_address, file_address, symbol_name = key
     location = {
         "load_address": "0x%x" % load_address,
         "file_address": None
         if file_address == lldb.LLDB_INVALID_ADDRESS
         else "0x%x" % file_address,
-        "module": module_name,
-        "module_path": module_path,
+        "module": names[1],
+        "module_path": names[2],
         "symbol": symbol_name,
     }
     entry = [location, _estimated_location_size(location), None]
-    if len(_FRAME_LOCATIONS) >= _LOCATION_SIZES_LIMIT:
-        _FRAME_LOCATIONS.clear()
-    _FRAME_LOCATIONS[key] = entry
+    locations = names[3]
+    if len(locations) >= _LOCATION_SIZES_LIMIT:
+        locations.clear()
+    locations[key] = entry
     return entry
 
 
-# Keyed by the raw address values and names behind _location's fields.
-_FRAME_LOCATIONS = {}
-# (module, filename, path) keyed by id(module); each entry keeps its module
-# alive so the id cannot be reused.
+# (module, filename, path, locations) keyed by id(module); each entry keeps
+# its module alive so the id cannot be reused. locations maps the raw
+# (load address, file address, symbol name) behind _location's other fields.
 _FRAME_MODULES = {}
 
 
@@ -535,7 +536,7 @@ def _record_estimate(
                 if len(_REGISTER_NAME_TEXTS) < _LOCATION_SIZES_LIMIT:
                     _REGISTER_NAME_TEXTS[name] = name_text
             # Hex digits need no escaping.
-            register_texts.append(name_text + '"' + value + '"}')
+            register_texts.append('%s"%s"}' % (name_text, value))
     receiver_class = None
     selector = None
     if objc_method:
@@ -721,11 +722,11 @@ def _handle_breakpoint(context, frame, index):
         target = context["target"]
         frame_at = thread.GetFrameAtIndex
         frame_modules = _FRAME_MODULES
-        frame_locations = _FRAME_LOCATIONS
         backtrace = record["backtrace"]
         append_location = backtrace.append
-        backtrace_texts = []
-        append_text = backtrace_texts.append
+        # The journal row, joined once after the loop.
+        row = ['{"kind": "event", "event": ', head]
+        append_text = row.append
         for depth in range(1, frame_count + 1):
             # _frame_location, with its cache-hit path inline.
             try:
@@ -735,39 +736,35 @@ def _handle_breakpoint(context, frame, index):
                 if names is None:
                     names = _frame_module_names(module)
                 symbol = address.GetSymbol()
-                file_address = address.GetFileAddress()
-                load_address = address.GetLoadAddress(target)
                 key = (
-                    load_address,
-                    file_address,
-                    names[1],
-                    names[2],
+                    address.GetLoadAddress(target),
+                    address.GetFileAddress(),
                     symbol.GetName() if symbol.IsValid() else None,
                 )
-                entry = frame_locations.get(key)
+                entry = names[3].get(key)
                 if entry is None:
-                    entry = _new_frame_location(key)
+                    entry = _new_frame_location(names, key)
             except ValueError:
                 return "resource-limit"
-            if entry[1] + record_bytes + 1 > available_bytes:
+            if entry[1] + record_bytes >= available_bytes:
                 return "resource-limit"
             location_text = entry[2]
             if location_text is None:
                 location_text = entry[2] = _encode_json(entry[0])
             # The estimate bounds len(location_text), so the check above
             # already admits this addition.
-            record_bytes += len(location_text) + 1 if backtrace else len(location_text)
+            if backtrace:
+                record_bytes += len(location_text) + 1
+                append_text(", ")
+            else:
+                record_bytes += len(location_text)
             append_location(entry[0])
             append_text(location_text)
         journal = context.get("observation_journal")
         if journal is not None:
-            if not journal.append_json(
-                '{"kind": "event", "event": '
-                + head
-                + ", ".join(backtrace_texts)
-                + tail
-                + "}"
-            ):
+            append_text(tail)
+            append_text("}\n")
+            if not journal.append_line("".join(row)):
                 return "resource-limit"
         events.append(record)
         context["retained_frames"] += event_frame_count
