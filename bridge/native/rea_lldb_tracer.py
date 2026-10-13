@@ -10,11 +10,8 @@ tracer's behalf. The result is written as JSON to the configured path.
 """
 
 import errno
-import hashlib
 import json
 import os
-import select
-import threading
 import time
 
 import lldb
@@ -162,6 +159,8 @@ def _set_launch_flags(launch):
 
 
 def _hash_file(path):
+    import hashlib
+
     digest = hashlib.sha256()
     with open(path, "rb") as target_file:
         while True:
@@ -209,6 +208,8 @@ class _OutputPipe:
     """Drain a target FIFO while retaining only its bounded output prefix."""
 
     def __init__(self, fifo_path, capture_path, max_bytes):
+        import threading
+
         os.mkfifo(fifo_path, 0o600)
         self.path = fifo_path
         try:
@@ -235,10 +236,14 @@ class _OutputPipe:
 
     def start(self):
         if self.reader_thread is None:
+            import threading
+
             self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
             self.reader_thread.start()
 
     def _reader_loop(self):
+        import select
+
         try:
             while not self.stop_reader.is_set():
                 readable, _, _ = select.select([self.fd], [], [], 0.05)
