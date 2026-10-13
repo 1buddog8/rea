@@ -159,8 +159,23 @@ def capture_tool_context(codex_home, output):
                 data = handle.read()
             digest = hashlib.sha256(data)
             counts = {}
+            # Decoding, selection and encoding depend only on the line bytes,
+            # so identical lines within one source are processed once.
+            outcomes = {}
             with io.BytesIO(data) as lines:
                 for ordinal, line in enumerate(lines, 1):
+                    outcome = outcomes.get(line)
+                    if outcome is not None:
+                        reason, kind, encoded = outcome
+                        if reason is not None:
+                            errors.append({'source': name, 'line': ordinal,
+                                           'reason': reason})
+                            continue
+                        counts[kind] = counts.get(kind, 0) + 1
+                        if encoded is not None:
+                            result.write(encoded)
+                            retained += 1
+                        continue
                     try:
                         # A leading '{' followed by a nonzero byte is what
                         # json.detect_encoding resolves to plain UTF-8.
@@ -173,14 +188,20 @@ def capture_tool_context(codex_home, output):
                             event = json.loads(line)
                         selected = selected_event(event)
                     except ValueError as error:
+                        reason = type(error).__name__
+                        outcomes[line] = (reason, None, None)
                         errors.append({'source': name, 'line': ordinal,
-                                       'reason': type(error).__name__})
+                                       'reason': reason})
                         continue
                     kind = event['type']  # selected_event checked it is a str
                     counts[kind] = counts.get(kind, 0) + 1
                     if selected is not None:
-                        result.write(join(iterencode(selected, 0)) + '\n')
+                        encoded = join(iterencode(selected, 0)) + '\n'
+                        result.write(encoded)
                         retained += 1
+                    else:
+                        encoded = None
+                    outcomes[line] = (None, kind, encoded)
             source_receipts.append({'source': name, 'sha256': digest.hexdigest(),
                                     'event_counts': counts})
     retained_digest = hashlib.sha256()
