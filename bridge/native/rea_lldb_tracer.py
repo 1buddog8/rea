@@ -65,6 +65,20 @@ def _estimated_json_size(value):
     return 64
 
 
+def _estimated_location_size(location):
+    """_estimated_json_size for a flat dict, with the common value types inline."""
+    size = 2
+    for key, item in location.items():
+        size += len(key) * 6 + 4
+        if item is None:
+            size += 32
+        elif type(item) is str:
+            size += len(item) * 12 + 2
+        else:
+            size += _estimated_json_size(item)
+    return size
+
+
 def _fits_trace_budget(value, remaining_bytes):
     return _estimated_json_size(value) <= remaining_bytes
 
@@ -249,13 +263,19 @@ def _location(address, target):
     module = address.GetModule()
     symbol = address.GetSymbol()
     file_address = address.GetFileAddress()
+    if module.IsValid():
+        file_spec = module.GetFileSpec()
+        module_name = file_spec.GetFilename()
+        module_path = str(file_spec)
+    else:
+        module_name = module_path = None
     location = {
-        "load_address": _hex(address.GetLoadAddress(target)),
+        "load_address": "0x%x" % address.GetLoadAddress(target),
         "file_address": None
         if file_address == lldb.LLDB_INVALID_ADDRESS
-        else _hex(file_address),
-        "module": module.GetFileSpec().GetFilename() if module.IsValid() else None,
-        "module_path": str(module.GetFileSpec()) if module.IsValid() else None,
+        else "0x%x" % file_address,
+        "module": module_name,
+        "module_path": module_path,
         "symbol": symbol.GetName() if symbol.IsValid() else None,
     }
     return location
@@ -495,24 +515,36 @@ def _breakpoint_report(target, created, config):
     report = []
     retained_location_bytes = 0
     locations_truncated = False
+    specs = config["breakpoints"]
+    dumps = json.dumps
     for index, breakpoints in enumerate(created):
         locations = []
         count = 0
+        spec = specs[index]
+        # Prefix every admitted symbol must start with, or None for all.
+        required_prefix = None
+        if spec["kind"] == "objc-method" and spec.get("class_name") is None:
+            method_type = spec.get("method_type", "any")
+            if method_type != "any":
+                required_prefix = "-[" if method_type == "instance" else "+["
         for breakpoint in breakpoints:
             for position in range(breakpoint.GetNumLocations()):
                 address = breakpoint.GetLocationAtIndex(position).GetAddress()
                 location = _location(address, target)
-                if not _wanted(config["breakpoints"][index], location["symbol"] or ""):
+                if required_prefix is not None and not (
+                    location["symbol"] or ""
+                ).startswith(required_prefix):
                     continue
                 count += 1
                 if len(locations) < MAX_REPORTED_LOCATIONS:
                     remaining_bytes = (
                         MAX_BREAKPOINT_LOCATION_BYTES - retained_location_bytes
                     )
-                    if not _fits_trace_budget(location, remaining_bytes):
+                    if _estimated_location_size(location) > remaining_bytes:
                         locations_truncated = True
                         continue
-                    location_bytes = len(json.dumps(location).encode("utf-8"))
+                    # json.dumps escapes non-ASCII, so characters are bytes.
+                    location_bytes = len(dumps(location))
                     addition = location_bytes + (1 if locations else 0)
                     if addition > remaining_bytes:
                         locations_truncated = True
