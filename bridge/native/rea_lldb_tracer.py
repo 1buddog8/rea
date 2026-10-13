@@ -447,6 +447,23 @@ def _read_register(frame, name):
 
 
 def _record(context, thread, frame, index, sequence, location, remaining_bytes):
+    result = _record_estimate(
+        context,
+        thread,
+        frame,
+        index,
+        sequence,
+        location,
+        _estimated_location_size(location),
+        remaining_bytes,
+    )
+    return None if result is None else result[0]
+
+
+def _record_estimate(
+    context, thread, frame, index, sequence, location, location_size, remaining_bytes
+):
+    """(_record, its _estimated_json_size), or None for an unwanted symbol."""
     target, process, config = context["target"], context["process"], context["config"]
     symbol = location["symbol"] or ""
     if not _wanted(config["breakpoints"][index], symbol):
@@ -474,7 +491,7 @@ def _record(context, thread, frame, index, sequence, location, remaining_bytes):
         if symbol.startswith("-["):
             receiver_class = _dynamic_class(target, values[names[0]])
     estimated_base = (
-        _estimated_location_size(location)
+        location_size
         + _estimated_json_size(receiver_class)
         + _estimated_json_size(selector)
         + 2048
@@ -491,8 +508,10 @@ def _record(context, thread, frame, index, sequence, location, remaining_bytes):
         "registers": registers,
         "backtrace": [],
     }
+    # Location keys are disjoint from the keys above, so the estimates add.
+    estimate = _estimated_json_size(record) + location_size - 2
     record.update(location)
-    return record
+    return record, estimate
 
 
 # One trace runs in each owned LLDB subprocess. Its callbacks execute at the
@@ -506,7 +525,9 @@ def _handle_breakpoint(context, frame, index):
         raise RuntimeError("LLDB breakpoint callback did not supply a readable frame")
     thread = frame.GetThread()
     events = context["events"]
-    location = _location(frame.GetPCAddress(), context["target"])
+    location, location_size = _frame_location(
+        frame.GetPCAddress(), context["target"]
+    )[:2]
     symbol = location["symbol"] or ""
     if not _wanted(context["config"]["breakpoints"][index], symbol):
         return None
@@ -524,13 +545,21 @@ def _handle_breakpoint(context, frame, index):
         return "resource-limit"
     try:
         remaining_bytes = MAX_TRACE_BYTES - context["retained_trace_bytes"]
-        record = _record(
-            context, thread, frame, index, len(events), location, remaining_bytes
+        result = _record_estimate(
+            context,
+            thread,
+            frame,
+            index,
+            len(events),
+            location,
+            location_size,
+            remaining_bytes,
         )
     except ValueError:
         return "resource-limit"
-    if record is not None:
-        if not _fits_trace_budget(record, remaining_bytes):
+    if result is not None:
+        record, estimate = result
+        if estimate > remaining_bytes:
             return "resource-limit"
         # json.dumps escapes non-ASCII, so characters are bytes.
         record_text = json.dumps(record)
