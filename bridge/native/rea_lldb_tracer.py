@@ -355,7 +355,7 @@ def _frame_location(address, target):
         if len(_FRAME_MODULES) >= _LOCATION_SIZES_LIMIT:
             _FRAME_MODULES.clear()
         _FRAME_MODULES[id(module)] = names
-    module_name, module_path = names[1], names[2]
+    _, module_name, module_path = names
     symbol = address.GetSymbol()
     file_address = address.GetFileAddress()
     load_address = address.GetLoadAddress(target)
@@ -484,18 +484,32 @@ def _record_estimate(
     target, process, config = context["target"], context["process"], context["config"]
     symbol = location["symbol"] or ""
     names = ARGUMENT_REGISTERS.get(config["architecture"], [])
-    objc_method = symbol.startswith("-[") or symbol.startswith("+[")
-    values = {
-        name: _read_register(frame, name)
-        for name in names[: max(config["argument_registers"], 2 if objc_method else 0)]
-    }
+    objc_method = symbol.startswith(("-[", "+["))
+    argument_registers = config["argument_registers"]
+    # _read_register for each name, sharing one SBError: a failed read raises
+    # before the next one.
+    error = lldb.SBError()
+    find_register = frame.FindRegister
+    values = {}
     registers = []
     # _estimated_json_size of the registers list, built alongside it.
     registers_size = 2
-    for name in names[: config["argument_registers"]]:
-        value = "0x%x" % values[name]
-        registers.append({"name": name, "value": value})
-        registers_size += 69 + 12 * (len(name) + len(value))
+    for position, name in enumerate(
+        names[: max(argument_registers, 2 if objc_method else 0)]
+    ):
+        register = find_register(name)
+        if not register.IsValid():
+            raise RuntimeError("LLDB breakpoint register %s is unavailable" % name)
+        number = register.GetValueAsUnsigned(error)
+        if error.Fail():
+            raise RuntimeError(
+                "LLDB breakpoint register %s could not be read: %s" % (name, error)
+            )
+        values[name] = number
+        if position < argument_registers:
+            value = "0x%x" % number
+            registers.append({"name": name, "value": value})
+            registers_size += 69 + 12 * (len(name) + len(value))
     receiver_class = None
     selector = None
     if objc_method:
@@ -574,15 +588,18 @@ def _record_json(record, location_text):
     ):
         return _encode_json(record)
     parts = []
+    append = parts.append
     for register in record["registers"]:
         name = register["name"]
         value = register["value"]
         if type(name) is not str or type(value) is not str:
             return _encode_json(record)
-        parts.append(
-            '{"name": %s, "value": %s}'
-            % (_encode_json_string(name), _encode_json_string(value))
-        )
+        name_text = _REGISTER_NAME_TEXTS.get(name)
+        if name_text is None:
+            name_text = '{"name": %s, "value": ' % _encode_json_string(name)
+            if len(_REGISTER_NAME_TEXTS) < _LOCATION_SIZES_LIMIT:
+                _REGISTER_NAME_TEXTS[name] = name_text
+        append(name_text + _encode_json_string(value) + "}")
     return (
         '{"sequence": %s, "elapsed_ms": %s, "thread_id": %s, '
         '"breakpoint_index": %s, "receiver_class": %s, "selector": %s, '
@@ -598,6 +615,10 @@ def _record_json(record, location_text):
             location_text[1:],
         )
     )
+
+
+# '{"name": <encoded name>, "value": ' keyed by register name.
+_REGISTER_NAME_TEXTS = {}
 
 
 # One trace runs in each owned LLDB subprocess. Its callbacks execute at the
