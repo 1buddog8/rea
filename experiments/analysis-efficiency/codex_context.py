@@ -1,6 +1,7 @@
 """Retain owned Codex tool/usage observations without account or ambient state."""
 
 import hashlib
+import io
 import json
 import os
 
@@ -89,11 +90,12 @@ def capture_tool_context(codex_home, output):
             if source.is_symlink() or not source.is_file():
                 errors.append({'source': name, 'reason': 'not_an_owned_regular_file'})
                 continue
-            digest = hashlib.sha256()
+            with source.open('rb') as handle:
+                data = handle.read()
+            digest = hashlib.sha256(data)
             counts = {}
-            with source.open('rb') as lines:
+            with io.BytesIO(data) as lines:
                 for ordinal, line in enumerate(lines, 1):
-                    digest.update(line)
                     try:
                         # A leading '{' followed by a nonzero byte is what
                         # json.detect_encoding resolves to plain UTF-8.
