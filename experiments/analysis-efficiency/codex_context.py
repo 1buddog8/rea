@@ -6,6 +6,12 @@ import json
 import os
 
 
+_TOOL_ITEM_TYPES = frozenset((
+    'custom_tool_call', 'custom_tool_call_output',
+    'function_call', 'function_call_output',
+))
+
+
 def token_counts(value):
     if not isinstance(value, dict):
         raise ValueError('Expected a token-count object')
@@ -19,6 +25,27 @@ def token_counts(value):
                 raise ValueError('Expected nonnegative integer token counts')
             result[key] = count
     return result
+
+
+def _select_token_counts(selected, source, keys):
+    """Store token_counts(source[key]) in selected for each present key, in one call."""
+    exact_type, integer = type, int
+    for key in keys:
+        if key in source:
+            value = source[key]
+            if not isinstance(value, dict):
+                raise ValueError('Expected a token-count object')
+            result = {}
+            for name in ('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
+                         'output_tokens', 'reasoning_output_tokens', 'total_tokens'):
+                if name in value:
+                    count = value[name]
+                    if (exact_type(count) is not integer
+                            and (not isinstance(count, int) or isinstance(count, bool))
+                            or count < 0):
+                        raise ValueError('Expected nonnegative integer token counts')
+                    result[name] = count
+            selected[key] = result
 
 
 def selected_event(event):
@@ -35,10 +62,10 @@ def selected_event(event):
     if timestamp is not None and not isinstance(timestamp, str):
         raise ValueError('Expected a timestamp string or omission')
     if kind == 'response_item':
-        if payload.get('type') not in (
-            'custom_tool_call', 'custom_tool_call_output',
-            'function_call', 'function_call_output',
-        ):
+        try:
+            if payload.get('type') not in _TOOL_ITEM_TYPES:
+                return None
+        except TypeError:  # unhashable values are never tool item types
             return None
         selected = {}
         for key in ('type', 'call_id', 'name', 'input', 'arguments', 'output'):
@@ -49,9 +76,7 @@ def selected_event(event):
         selected = {}
         if 'response_id' in payload:
             selected['response_id'] = payload['response_id']
-        for key in ('usage', 'turn_token_usage', 'thread_token_usage'):
-            if key in payload:
-                selected[key] = token_counts(payload[key])
+        _select_token_counts(selected, payload, ('usage', 'turn_token_usage', 'thread_token_usage'))
         return {'timestamp': timestamp, 'type': kind, 'payload': selected}
     if kind == 'event_msg' and payload.get('type') == 'token_count':
         info = payload.get('info')
@@ -59,9 +84,7 @@ def selected_event(event):
             if not isinstance(info, dict):
                 raise ValueError('Expected token-count info')
             selected_info = {}
-            for key in ('total_token_usage', 'last_token_usage'):
-                if key in info:
-                    selected_info[key] = token_counts(info[key])
+            _select_token_counts(selected_info, info, ('total_token_usage', 'last_token_usage'))
             if 'model_context_window' in info:
                 window = info['model_context_window']
                 if window is not None and (not isinstance(window, int) or isinstance(window, bool) or window <= 0):
