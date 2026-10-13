@@ -347,35 +347,52 @@ def _frame_location(address, target):
     module = address.GetModule()
     names = _FRAME_MODULES.get(id(module))
     if names is None:
-        if module.IsValid():
-            file_spec = module.GetFileSpec()
-            names = (module, file_spec.GetFilename(), str(file_spec))
-        else:
-            names = (module, None, None)
-        if len(_FRAME_MODULES) >= _LOCATION_SIZES_LIMIT:
-            _FRAME_MODULES.clear()
-        _FRAME_MODULES[id(module)] = names
-    _, module_name, module_path = names
+        names = _frame_module_names(module)
     symbol = address.GetSymbol()
     file_address = address.GetFileAddress()
     load_address = address.GetLoadAddress(target)
-    symbol_name = symbol.GetName() if symbol.IsValid() else None
-    key = (load_address, file_address, module_name, module_path, symbol_name)
+    key = (
+        load_address,
+        file_address,
+        names[1],
+        names[2],
+        symbol.GetName() if symbol.IsValid() else None,
+    )
     entry = _FRAME_LOCATIONS.get(key)
     if entry is None:
-        location = {
-            "load_address": "0x%x" % load_address,
-            "file_address": None
-            if file_address == lldb.LLDB_INVALID_ADDRESS
-            else "0x%x" % file_address,
-            "module": module_name,
-            "module_path": module_path,
-            "symbol": symbol_name,
-        }
-        entry = [location, _estimated_location_size(location), None]
-        if len(_FRAME_LOCATIONS) >= _LOCATION_SIZES_LIMIT:
-            _FRAME_LOCATIONS.clear()
-        _FRAME_LOCATIONS[key] = entry
+        entry = _new_frame_location(key)
+    return entry
+
+
+def _frame_module_names(module):
+    """Memoise (module, filename, path) for a module not yet in _FRAME_MODULES."""
+    if module.IsValid():
+        file_spec = module.GetFileSpec()
+        names = (module, file_spec.GetFilename(), str(file_spec))
+    else:
+        names = (module, None, None)
+    if len(_FRAME_MODULES) >= _LOCATION_SIZES_LIMIT:
+        _FRAME_MODULES.clear()
+    _FRAME_MODULES[id(module)] = names
+    return names
+
+
+def _new_frame_location(key):
+    """Memoise the _frame_location entry for a key not yet in _FRAME_LOCATIONS."""
+    load_address, file_address, module_name, module_path, symbol_name = key
+    location = {
+        "load_address": "0x%x" % load_address,
+        "file_address": None
+        if file_address == lldb.LLDB_INVALID_ADDRESS
+        else "0x%x" % file_address,
+        "module": module_name,
+        "module_path": module_path,
+        "symbol": symbol_name,
+    }
+    entry = [location, _estimated_location_size(location), None]
+    if len(_FRAME_LOCATIONS) >= _LOCATION_SIZES_LIMIT:
+        _FRAME_LOCATIONS.clear()
+    _FRAME_LOCATIONS[key] = entry
     return entry
 
 
@@ -576,8 +593,8 @@ def _record_estimate(
 
 
 def _record_json(record, location_text, registers_text=None):
-    """_encode_json(record) for a _record_estimate record whose backtrace is
-    still empty, reusing location_text, the encoded location it was updated
+    """_encode_json(record), split as (head, tail) just inside the brackets of
+    the still empty backtrace, for a _record_estimate record, reusing location_text, the encoded location it was updated
     with, and registers_text, the encoded registers it returned, if given.
     Falls back to _encode_json for unexpected value types."""
     sequence = record["sequence"]
@@ -596,7 +613,7 @@ def _record_json(record, location_text, registers_text=None):
         or not (selector is None or type(selector) is str)
         or len(location_text) < 3
     ):
-        return _encode_json(record)
+        return _split_record_json(_encode_json(record))
     if registers_text is None:
         parts = []
         append = parts.append
@@ -604,7 +621,7 @@ def _record_json(record, location_text, registers_text=None):
             name = register["name"]
             value = register["value"]
             if type(name) is not str or type(value) is not str:
-                return _encode_json(record)
+                return _split_record_json(_encode_json(record))
             name_text = _REGISTER_NAME_TEXTS.get(name)
             if name_text is None:
                 name_text = '{"name": %s, "value": ' % _encode_json_string(name)
@@ -615,7 +632,7 @@ def _record_json(record, location_text, registers_text=None):
     return (
         '{"sequence": %s, "elapsed_ms": %s, "thread_id": %s, '
         '"breakpoint_index": %s, "receiver_class": %s, "selector": %s, '
-        '"registers": [%s], "backtrace": [], %s'
+        '"registers": [%s], "backtrace": ['
         % (
             int.__repr__(sequence),
             type(elapsed).__repr__(elapsed),
@@ -624,9 +641,17 @@ def _record_json(record, location_text, registers_text=None):
             "null" if receiver_class is None else _encode_json_string(receiver_class),
             "null" if selector is None else _encode_json_string(selector),
             registers_text,
-            location_text[1:],
-        )
+        ),
+        "], " + location_text[1:],
     )
+
+
+def _split_record_json(text):
+    """(head, tail) of an encoded record around its still empty backtrace."""
+    # String values escape every quote, so the first unescaped
+    # '"backtrace": [' is the record's own (still empty) list.
+    head, marker, tail = text.partition('"backtrace": [')
+    return head + marker, tail
 
 
 # '{"name": <encoded name>, "value": ' keyed by register name.
@@ -646,19 +671,24 @@ def _handle_breakpoint(context, frame, index):
     events = context["events"]
     top_entry = _frame_location(frame.GetPCAddress(), context["target"])
     location, location_size = top_entry[0], top_entry[1]
-    symbol = location["symbol"] or ""
-    if not _wanted(context["config"]["breakpoints"][index], symbol):
-        return None
+    config = context["config"]
+    spec = config["breakpoints"][index]
+    # _wanted, inline.
+    if spec["kind"] == "objc-method" and spec.get("class_name") is None:
+        method_type = spec.get("method_type", "any")
+        if method_type != "any" and not (location["symbol"] or "").startswith(
+            "-[" if method_type == "instance" else "+["
+        ):
+            return None
     frame_count = max(
         0,
-        min(thread.GetNumFrames() - 1, context["config"]["backtrace_frames"]),
+        min(thread.GetNumFrames() - 1, config["backtrace_frames"]),
     )
     event_frame_count = 1 + frame_count
-    if not _can_retain_trace(
-        context["retained_trace_bytes"],
-        context["retained_frames"],
-        0,
-        event_frame_count,
+    # _can_retain_trace for an event of event_frame_count frames, inline.
+    if (
+        context["retained_trace_bytes"] > MAX_TRACE_BYTES
+        or context["retained_frames"] + event_frame_count > MAX_TRACE_FRAMES
     ):
         return "resource-limit"
     try:
@@ -683,42 +713,57 @@ def _handle_breakpoint(context, frame, index):
         location_text = top_entry[2]
         if location_text is None:
             location_text = top_entry[2] = _encode_json(location)
-        record_text = _record_json(record, location_text, registers_text)
-        record_bytes = len(record_text)
+        head, tail = _record_json(record, location_text, registers_text)
+        record_bytes = len(head) + len(tail)
         available_bytes = MAX_TRACE_BYTES - context["retained_trace_bytes"]
         if record_bytes > available_bytes:
             return "resource-limit"
         target = context["target"]
         frame_at = thread.GetFrameAtIndex
+        frame_modules = _FRAME_MODULES
+        frame_locations = _FRAME_LOCATIONS
         backtrace = record["backtrace"]
+        append_location = backtrace.append
         backtrace_texts = []
+        append_text = backtrace_texts.append
         for depth in range(1, frame_count + 1):
+            # _frame_location, with its cache-hit path inline.
             try:
-                entry = _frame_location(frame_at(depth).GetPCAddress(), target)
+                address = frame_at(depth).GetPCAddress()
+                module = address.GetModule()
+                names = frame_modules.get(id(module))
+                if names is None:
+                    names = _frame_module_names(module)
+                symbol = address.GetSymbol()
+                file_address = address.GetFileAddress()
+                load_address = address.GetLoadAddress(target)
+                key = (
+                    load_address,
+                    file_address,
+                    names[1],
+                    names[2],
+                    symbol.GetName() if symbol.IsValid() else None,
+                )
+                entry = frame_locations.get(key)
+                if entry is None:
+                    entry = _new_frame_location(key)
             except ValueError:
                 return "resource-limit"
             if entry[1] + record_bytes + 1 > available_bytes:
                 return "resource-limit"
-            location = entry[0]
             location_text = entry[2]
             if location_text is None:
-                location_text = entry[2] = _encode_json(location)
+                location_text = entry[2] = _encode_json(entry[0])
             # The estimate bounds len(location_text), so the check above
             # already admits this addition.
-            location_bytes = len(location_text)
-            addition = location_bytes + 1 if backtrace else location_bytes
-            backtrace.append(location)
-            backtrace_texts.append(location_text)
-            record_bytes += addition
+            record_bytes += len(location_text) + 1 if backtrace else len(location_text)
+            append_location(entry[0])
+            append_text(location_text)
         journal = context.get("observation_journal")
         if journal is not None:
-            # String values escape every quote, so the first unescaped
-            # '"backtrace": [' is the record's own (still empty) list.
-            head, marker, tail = record_text.partition('"backtrace": [')
             if not journal.append_json(
                 '{"kind": "event", "event": '
                 + head
-                + marker
                 + ", ".join(backtrace_texts)
                 + tail
                 + "}"
@@ -727,7 +772,7 @@ def _handle_breakpoint(context, frame, index):
         events.append(record)
         context["retained_frames"] += event_frame_count
         context["retained_trace_bytes"] += record_bytes
-    if len(events) >= context["config"]["max_events"]:
+    if len(events) >= config["max_events"]:
         return "event-limit"
     return None
 
