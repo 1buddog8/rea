@@ -563,9 +563,36 @@ def _handle_stop(context, other_stops):
     return None
 
 
+_LOCATION_KEYS = ("load_address", "file_address", "module", "module_path", "symbol")
+_LOCATION_KEYS_ESTIMATE = _estimated_location_size(dict.fromkeys(_LOCATION_KEYS, ""))
+_LOCATION_KEYS_JSON_SIZE = _location_json_size(dict.fromkeys(_LOCATION_KEYS, ""))
+
+
+def _report_location_sizes(location):
+    """Estimated and exact JSON sizes of a _location result; exact is None when
+    the estimate already exceeds the report budget."""
+    estimate = _LOCATION_KEYS_ESTIMATE
+    exact = _LOCATION_KEYS_JSON_SIZE
+    for item in location.values():
+        if item is None:
+            estimate += 30
+            exact += 2
+        elif type(item) is str:
+            estimate += len(item) * 12
+            exact += len(_encode_json_string(item)) - 2
+        else:
+            estimate = _estimated_location_size(location)
+            exact = _location_json_size(location)
+            break
+    if estimate > MAX_BREAKPOINT_LOCATION_BYTES:
+        return estimate, None
+    # json.dumps escapes non-ASCII, so characters are bytes.
+    return estimate, exact
+
+
 def _breakpoint_report(target, created, config):
     report = []
-    retained_location_bytes = 0
+    remaining_bytes = MAX_BREAKPOINT_LOCATION_BYTES
     locations_truncated = False
     specs = config["breakpoints"]
     # Breakpoints often share address objects; resolve and size each one once.
@@ -586,47 +613,45 @@ def _breakpoint_report(target, created, config):
             location_total = breakpoint.GetNumLocations()
             location_at = breakpoint.GetLocationAtIndex
             full = len(locations) >= MAX_REPORTED_LOCATIONS
+            if required_prefix is None:
+                # Every location counts; resolve only those that may be reported.
+                count += location_total
+                if full:
+                    continue
             for position in range(location_total):
-                if full and required_prefix is None:
-                    # Nothing more can be reported; only the count changes.
-                    count += location_total - position
-                    break
                 address = location_at(position).GetAddress()
                 # The entry keeps the address alive, so a matching id is the
                 # same object.
                 entry = resolved_get(id(address))
                 if entry is None:
                     location = _location(address, target)
-                    estimate = _estimated_location_size(location)
-                    # json.dumps escapes non-ASCII, so characters are bytes.
+                    estimate, exact = _report_location_sizes(location)
                     entry = resolved[id(address)] = (
                         address,
                         location,
                         estimate,
-                        _location_json_size(location)
-                        if estimate <= MAX_BREAKPOINT_LOCATION_BYTES
-                        else None,
+                        exact,
                         location["symbol"] or "",
                     )
-                if required_prefix is not None and not entry[4].startswith(
-                    required_prefix
-                ):
+                if required_prefix is not None:
+                    if not entry[4].startswith(required_prefix):
+                        continue
+                    count += 1
+                    if full:
+                        continue
+                if entry[2] > remaining_bytes:
+                    locations_truncated = True
                     continue
-                count += 1
-                if not full:
-                    remaining_bytes = (
-                        MAX_BREAKPOINT_LOCATION_BYTES - retained_location_bytes
-                    )
-                    if entry[2] > remaining_bytes:
-                        locations_truncated = True
-                        continue
-                    addition = entry[3] + 1 if locations else entry[3]
-                    if addition > remaining_bytes:
-                        locations_truncated = True
-                        continue
-                    locations.append(entry[1])
-                    retained_location_bytes += addition
-                    full = len(locations) >= MAX_REPORTED_LOCATIONS
+                addition = entry[3] + 1 if locations else entry[3]
+                if addition > remaining_bytes:
+                    locations_truncated = True
+                    continue
+                locations.append(entry[1])
+                remaining_bytes -= addition
+                if len(locations) >= MAX_REPORTED_LOCATIONS:
+                    if required_prefix is None:
+                        break
+                    full = True
         report.append({"index": index, "location_count": count, "locations": locations})
     return report, locations_truncated
 
