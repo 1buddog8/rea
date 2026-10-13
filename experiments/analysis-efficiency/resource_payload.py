@@ -8,6 +8,8 @@ import sys
 import time
 
 _DECODER = json.JSONDecoder()
+_SCAN = _DECODER.scan_once
+_WHITESPACE = json.decoder.WHITESPACE.match
 _REQUIRED_EVENTS = (('memory.events', ('high', 'max', 'oom', 'oom_kill')),
                     ('pids.events', ('max',)))
 _OBSERVATION_NAMES = ('phase', 'ownership_token', 'payload_exit_code', 'observer_pid',
@@ -46,7 +48,11 @@ def read_observation(path, token):
     try:
         if path.is_symlink():
             return None
-        value = _DECODER.decode(path.read_text())
+        # Same acceptance as _DECODER.decode without its two Python-level frames.
+        text = path.read_text()
+        value, end = _SCAN(text, _WHITESPACE(text, 0).end())
+        if _WHITESPACE(text, end).end() != len(text):
+            return None
         if not isinstance(value, dict) or value.get('ownership_token') != token:
             return None
         if value.get('phase') != 'payload-exited-observer-alive':
@@ -87,10 +93,17 @@ def read_observation(path, token):
         for x in cpu.values():
             if type(x) is not int or x < 0:
                 return None
-        result = {name: value[name] for name in _OBSERVATION_NAMES}
-        result['resource_events'] = {name: events[name] for name, _ in _REQUIRED_EVENTS}
-        return result
-    except (OSError, ValueError, TypeError):
+        return {
+            'phase': value['phase'], 'ownership_token': value['ownership_token'],
+            'payload_exit_code': value['payload_exit_code'],
+            'observer_pid': value['observer_pid'], 'remaining_processes': actors,
+            'payload_cleanup_verified': value['payload_cleanup_verified'],
+            'cpu_stat': cpu, 'memory_peak_bytes': value['memory_peak_bytes'],
+            'control_group': value['control_group'],
+            'resource_events': {'memory.events': events['memory.events'],
+                                'pids.events': events['pids.events']},
+        }
+    except (OSError, ValueError, TypeError, StopIteration):
         return None
 
 
