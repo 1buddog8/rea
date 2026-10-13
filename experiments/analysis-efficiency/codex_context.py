@@ -72,6 +72,24 @@ def selected_event(event):
     return None
 
 
+def _event_encoder():
+    """Return a one-shot encoder equal to JSONEncoder(ensure_ascii=False).encode
+    for objects, building the C encoder once instead of on every call."""
+    encoder = json.JSONEncoder(ensure_ascii=False)
+    make = json.encoder.c_make_encoder
+    if make is not None:
+        args = (encoder.default, json.encoder.encode_basestring, None)
+        tail = (encoder.key_separator, encoder.item_separator,
+                encoder.sort_keys, encoder.skipkeys, encoder.allow_nan)
+        for extra in ((), (float.__repr__,)):
+            try:
+                iterencode = make({}, *args, *extra, *tail)
+            except TypeError:
+                continue
+            return lambda value: ''.join(iterencode(value, 0))
+    return encoder.encode
+
+
 def capture_tool_context(codex_home, output):
     """Capture only an explicitly selected trial's rollouts; never its auth/config."""
     sessions = codex_home / 'sessions'
@@ -81,7 +99,7 @@ def capture_tool_context(codex_home, output):
     source_receipts = []
     errors = [{'source': 'sessions', 'reason': 'not_an_owned_directory'}] if blocked else []
     retained = 0
-    encode = json.JSONEncoder(ensure_ascii=False).encode
+    encode = _event_encoder()
     scan_once = json.scanner.make_scanner(json.JSONDecoder())
     with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
                    'w', encoding='utf-8') as result:
