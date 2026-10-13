@@ -7,6 +7,13 @@ import subprocess
 import sys
 import time
 
+_DECODER = json.JSONDecoder()
+_REQUIRED_EVENTS = (('memory.events', ('high', 'max', 'oom', 'oom_kill')),
+                    ('pids.events', ('max',)))
+_OBSERVATION_NAMES = ('phase', 'ownership_token', 'payload_exit_code', 'observer_pid',
+                      'remaining_processes', 'payload_cleanup_verified',
+                      'cpu_stat', 'memory_peak_bytes', 'control_group')
+
 
 def pairs(path):
     values = {}
@@ -39,46 +46,50 @@ def read_observation(path, token):
     try:
         if path.is_symlink():
             return None
-        value = json.loads(path.read_text())
+        value = _DECODER.decode(path.read_text())
         if not isinstance(value, dict) or value.get('ownership_token') != token:
             return None
         if value.get('phase') != 'payload-exited-observer-alive':
             return None
         if not isinstance(value.get('control_group'), str) or not value['control_group']:
             return None
-        for name in ['payload_exit_code', 'observer_pid', 'memory_peak_bytes']:
+        for name in ('payload_exit_code', 'observer_pid', 'memory_peak_bytes'):
             if type(value.get(name)) is not int:
                 return None
         if value['observer_pid'] <= 0 or value['memory_peak_bytes'] < 0:
             return None
         actors = value.get('remaining_processes')
-        if not isinstance(actors, list) or any(type(x) is not int or x <= 0 for x in actors):
+        if not isinstance(actors, list):
             return None
+        for x in actors:
+            if type(x) is not int or x <= 0:
+                return None
         if type(value.get('payload_cleanup_verified')) is not bool:
             return None
         if value['payload_cleanup_verified'] != (actors == [value['observer_pid']]):
             return None
-        required = {'memory.events': ['high', 'max', 'oom', 'oom_kill'],
-                    'pids.events': ['max']}
         events = value.get('resource_events')
         if not isinstance(events, dict):
             return None
-        for name, keys in required.items():
+        for name, keys in _REQUIRED_EVENTS:
             record = events.get(name)
-            if not isinstance(record, dict) or any(key not in record for key in keys):
+            if not isinstance(record, dict):
                 return None
-            if any(type(x) is not int or x < 0 for x in record.values()):
-                return None
+            for key in keys:
+                if key not in record:
+                    return None
+            for x in record.values():
+                if type(x) is not int or x < 0:
+                    return None
         cpu = value.get('cpu_stat')
         if not isinstance(cpu, dict) or 'usage_usec' not in cpu:
             return None
-        if any(type(x) is not int or x < 0 for x in cpu.values()):
-            return None
-        names = ['phase', 'ownership_token', 'payload_exit_code', 'observer_pid',
-                 'remaining_processes', 'payload_cleanup_verified',
-                 'cpu_stat', 'memory_peak_bytes', 'control_group']
-        return {**{name: value[name] for name in names},
-                'resource_events': {name: events[name] for name in required}}
+        for x in cpu.values():
+            if type(x) is not int or x < 0:
+                return None
+        result = {name: value[name] for name in _OBSERVATION_NAMES}
+        result['resource_events'] = {name: events[name] for name, _ in _REQUIRED_EVENTS}
+        return result
     except (OSError, ValueError, TypeError):
         return None
 
