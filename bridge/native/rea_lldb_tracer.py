@@ -474,10 +474,13 @@ def _record_estimate(
         name: _read_register(frame, name)
         for name in names[: max(config["argument_registers"], 2 if objc_method else 0)]
     }
-    registers = [
-        {"name": name, "value": _hex(values[name])}
-        for name in names[: config["argument_registers"]]
-    ]
+    registers = []
+    # _estimated_json_size of the registers list, built alongside it.
+    registers_size = 2
+    for name in names[: config["argument_registers"]]:
+        value = "0x%x" % values[name]
+        registers.append({"name": name, "value": value})
+        registers_size += 69 + 12 * (len(name) + len(value))
     receiver_class = None
     selector = None
     if objc_method:
@@ -490,18 +493,16 @@ def _record_estimate(
         selector = text if error.Success() and text else None
         if symbol.startswith("-["):
             receiver_class = _dynamic_class(target, values[names[0]])
-    estimated_base = (
-        location_size
-        + _estimated_json_size(receiver_class)
-        + _estimated_json_size(selector)
-        + 2048
-    )
+    receiver_class_size = _estimated_json_size(receiver_class)
+    selector_size = _estimated_json_size(selector)
+    estimated_base = location_size + receiver_class_size + selector_size + 2048
     if estimated_base > remaining_bytes:
         raise ValueError("trace event exceeds aggregate byte budget")
+    thread_id = thread.GetThreadID()
     record = {
         "sequence": sequence,
         "elapsed_ms": round((time.monotonic() - context["started"]) * 1000, 3),
-        "thread_id": thread.GetThreadID(),
+        "thread_id": thread_id,
         "breakpoint_index": index,
         "receiver_class": receiver_class,
         "selector": selector,
@@ -509,7 +510,21 @@ def _record_estimate(
         "backtrace": [],
     }
     # Location keys are disjoint from the keys above, so the estimates add.
-    estimate = _estimated_json_size(record) + location_size - 2
+    # Equal to _estimated_json_size(record): 532 covers the braces and the
+    # eight keys, 32 the float elapsed_ms and 2 the empty backtrace.
+    estimate = (
+        532
+        + _estimated_json_size(sequence)
+        + 32
+        + _estimated_json_size(thread_id)
+        + _estimated_json_size(index)
+        + receiver_class_size
+        + selector_size
+        + registers_size
+        + 2
+        + location_size
+        - 2
+    )
     record.update(location)
     return record, estimate
 
