@@ -334,7 +334,9 @@ def _location(address, target):
 
 
 def _frame_location(address, target):
-    """_location and _location_sizes of one backtrace frame address."""
+    """[_location, estimated size, json.dumps text or None] of one backtrace
+    frame address, memoised by the raw LLDB values. Entries are shared and
+    must not be mutated."""
     module = address.GetModule()
     symbol = address.GetSymbol()
     file_address = address.GetFileAddress()
@@ -344,31 +346,29 @@ def _frame_location(address, target):
         module_path = str(file_spec)
     else:
         module_name = module_path = None
-    load_address = "0x%x" % address.GetLoadAddress(target)
-    if file_address == lldb.LLDB_INVALID_ADDRESS:
-        file_address = None
-    else:
-        file_address = "0x%x" % file_address
+    load_address = address.GetLoadAddress(target)
     symbol_name = symbol.GetName() if symbol.IsValid() else None
-    location = {
-        "load_address": load_address,
-        "file_address": file_address,
-        "module": module_name,
-        "module_path": module_path,
-        "symbol": symbol_name,
-    }
     key = (load_address, file_address, module_name, module_path, symbol_name)
-    sizes = _FRAME_LOCATION_SIZES.get(key)
-    if sizes is None:
-        sizes = [_estimated_location_size(location), None]
-        if len(_FRAME_LOCATION_SIZES) >= _LOCATION_SIZES_LIMIT:
-            _FRAME_LOCATION_SIZES.clear()
-        _FRAME_LOCATION_SIZES[key] = sizes
-    return location, sizes
+    entry = _FRAME_LOCATIONS.get(key)
+    if entry is None:
+        location = {
+            "load_address": "0x%x" % load_address,
+            "file_address": None
+            if file_address == lldb.LLDB_INVALID_ADDRESS
+            else "0x%x" % file_address,
+            "module": module_name,
+            "module_path": module_path,
+            "symbol": symbol_name,
+        }
+        entry = [location, _estimated_location_size(location), None]
+        if len(_FRAME_LOCATIONS) >= _LOCATION_SIZES_LIMIT:
+            _FRAME_LOCATIONS.clear()
+        _FRAME_LOCATIONS[key] = entry
+    return entry
 
 
-# Keyed by the values of _location's fixed keys, in order.
-_FRAME_LOCATION_SIZES = {}
+# Keyed by the raw address values and names behind _location's fields.
+_FRAME_LOCATIONS = {}
 
 
 def _no_files():
@@ -544,14 +544,15 @@ def _handle_breakpoint(context, frame, index):
         backtrace_texts = []
         for depth in range(1, frame_count + 1):
             try:
-                location, sizes = _frame_location(frame_at(depth).GetPCAddress(), target)
+                entry = _frame_location(frame_at(depth).GetPCAddress(), target)
             except ValueError:
                 return "resource-limit"
-            if sizes[0] + record_bytes + 1 > available_bytes:
+            if entry[1] + record_bytes + 1 > available_bytes:
                 return "resource-limit"
-            location_text = sizes[1]
+            location = entry[0]
+            location_text = entry[2]
             if location_text is None:
-                location_text = sizes[1] = json.dumps(location)
+                location_text = entry[2] = json.dumps(location)
             location_bytes = len(location_text)
             addition = location_bytes + 1 if backtrace else location_bytes
             if record_bytes + addition > available_bytes:
