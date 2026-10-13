@@ -674,7 +674,16 @@ def _handle_breakpoint(context, frame, index):
         raise RuntimeError("LLDB breakpoint callback did not supply a readable frame")
     thread = frame.GetThread()
     events = context["events"]
-    top_entry = _frame_location(frame.GetPCAddress(), context["target"])
+    pc_address = frame.GetPCAddress()
+    # _frame_location through the same id(address) cache as the backtrace.
+    cached = _FRAME_ADDRESSES.get(id(pc_address))
+    if cached is not None:
+        top_entry = cached[1]
+    else:
+        top_entry = _frame_location(pc_address, context["target"])
+        if len(_FRAME_ADDRESSES) >= _LOCATION_SIZES_LIMIT:
+            _FRAME_ADDRESSES.clear()
+        _FRAME_ADDRESSES[id(pc_address)] = (pc_address, top_entry)
     location, location_size = top_entry[0], top_entry[1]
     config = context["config"]
     spec = config["breakpoints"][index]
