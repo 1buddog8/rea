@@ -116,7 +116,7 @@ _LOCATION_SIZES_LIMIT = 4096
 
 
 def _location_sizes(location):
-    """[estimated, exact or None] JSON sizes of one flat location, memoised by content."""
+    """[estimated size, json.dumps text or None] of one flat location, memoised by content."""
     key = tuple(location.items())
     sizes = _LOCATION_SIZES.get(key)
     if sizes is None:
@@ -140,7 +140,11 @@ class _ObservationJournal:
         self.bytes = 0
 
     def append(self, record):
-        encoded = (json.dumps(record) + "\n").encode("utf-8")
+        return self.append_json(json.dumps(record))
+
+    def append_json(self, text):
+        """Append one row already serialized with json.dumps defaults."""
+        encoded = (text + "\n").encode("utf-8")
         if self.bytes + len(encoded) > self.max_bytes:
             return False
         self.handle.write(encoded)
@@ -491,13 +495,15 @@ def _handle_breakpoint(context, frame, index):
         if not _fits_trace_budget(record, remaining_bytes):
             return "resource-limit"
         # json.dumps escapes non-ASCII, so characters are bytes.
-        record_bytes = len(json.dumps(record))
+        record_text = json.dumps(record)
+        record_bytes = len(record_text)
         available_bytes = MAX_TRACE_BYTES - context["retained_trace_bytes"]
         if record_bytes > available_bytes:
             return "resource-limit"
         target = context["target"]
         frame_at = thread.GetFrameAtIndex
         backtrace = record["backtrace"]
+        backtrace_texts = []
         for depth in range(1, frame_count + 1):
             try:
                 location = _location(frame_at(depth).GetPCAddress(), target)
@@ -506,19 +512,30 @@ def _handle_breakpoint(context, frame, index):
             sizes = _location_sizes(location)
             if sizes[0] + record_bytes + 1 > available_bytes:
                 return "resource-limit"
-            location_bytes = sizes[1]
-            if location_bytes is None:
-                location_bytes = sizes[1] = _location_json_size(location)
+            location_text = sizes[1]
+            if location_text is None:
+                location_text = sizes[1] = json.dumps(location)
+            location_bytes = len(location_text)
             addition = location_bytes + 1 if backtrace else location_bytes
             if record_bytes + addition > available_bytes:
                 return "resource-limit"
             backtrace.append(location)
+            backtrace_texts.append(location_text)
             record_bytes += addition
         journal = context.get("observation_journal")
-        if journal is not None and not journal.append(
-            {"kind": "event", "event": record}
-        ):
-            return "resource-limit"
+        if journal is not None:
+            # String values escape every quote, so the first unescaped
+            # '"backtrace": [' is the record's own (still empty) list.
+            head, marker, tail = record_text.partition('"backtrace": [')
+            if not journal.append_json(
+                '{"kind": "event", "event": '
+                + head
+                + marker
+                + ", ".join(backtrace_texts)
+                + tail
+                + "}"
+            ):
+                return "resource-limit"
         events.append(record)
         context["retained_frames"] += event_frame_count
         context["retained_trace_bytes"] += record_bytes
