@@ -92,6 +92,25 @@ def _estimated_location_size(location):
     return size
 
 
+_encode_json_string = json.encoder.encode_basestring_ascii
+
+
+def _location_json_size(location):
+    """Exact len(json.dumps(location)) for a flat dict of str or None values."""
+    size = 2 * len(location) or 2
+    for key, item in location.items():
+        if type(key) is not str:
+            return len(json.dumps(location))
+        size += len(_encode_json_string(key)) + 2
+        if item is None:
+            size += 4
+        elif type(item) is str:
+            size += len(_encode_json_string(item))
+        else:
+            return len(json.dumps(location))
+    return size
+
+
 def _fits_trace_budget(value, remaining_bytes):
     return _estimated_json_size(value) <= remaining_bytes
 
@@ -471,7 +490,7 @@ def _handle_breakpoint(context, frame, index):
                 > MAX_TRACE_BYTES - context["retained_trace_bytes"]
             ):
                 return "resource-limit"
-            location_bytes = len(json.dumps(location))
+            location_bytes = _location_json_size(location)
             addition = location_bytes + (1 if record["backtrace"] else 0)
             if (
                 context["retained_trace_bytes"]
