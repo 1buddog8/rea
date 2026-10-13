@@ -96,8 +96,9 @@ def selected_event(event):
 
 
 def _event_encoder():
-    """Return a one-shot encoder equal to JSONEncoder(ensure_ascii=False).encode
-    for objects, building the C encoder once instead of on every call."""
+    """Return iterencode(value, 0) whose joined chunks equal
+    JSONEncoder(ensure_ascii=False).encode for objects, building the C encoder
+    once instead of on every call."""
     encoder = json.JSONEncoder(ensure_ascii=False)
     make = json.encoder.c_make_encoder
     if make is not None:
@@ -106,11 +107,32 @@ def _event_encoder():
                 encoder.sort_keys, encoder.skipkeys, encoder.allow_nan)
         for extra in ((), (float.__repr__,)):
             try:
-                iterencode = make({}, *args, *extra, *tail)
+                return make({}, *args, *extra, *tail)
             except TypeError:
                 continue
-            return lambda value: ''.join(iterencode(value, 0))
-    return encoder.encode
+    return lambda value, _level: (encoder.encode(value),)
+
+
+def _indented_json(value, level=0):
+    """Return json.dumps(value, indent=2) for the str-keyed receipt values,
+    formatting containers directly instead of through the pure-Python encoder."""
+    kind = type(value)
+    if kind is str:
+        return json.encoder.encode_basestring_ascii(value)
+    if kind is int:
+        return int.__repr__(value)
+    if kind is dict or kind is list:
+        if not value:
+            return '{}' if kind is dict else '[]'
+        inner = '\n' + '  ' * (level + 1)
+        if kind is dict:
+            quote = json.encoder.encode_basestring_ascii
+            items = [quote(key) + ': ' + _indented_json(item, level + 1)
+                     for key, item in value.items()]
+            return '{' + inner + (',' + inner).join(items) + '\n' + '  ' * level + '}'
+        items = [_indented_json(item, level + 1) for item in value]
+        return '[' + inner + (',' + inner).join(items) + '\n' + '  ' * level + ']'
+    return json.dumps(value)
 
 
 def capture_tool_context(codex_home, output):
@@ -122,7 +144,8 @@ def capture_tool_context(codex_home, output):
     source_receipts = []
     errors = [{'source': 'sessions', 'reason': 'not_an_owned_directory'}] if blocked else []
     retained = 0
-    encode = _event_encoder()
+    iterencode = _event_encoder()
+    join = ''.join
     scan_once = json.scanner.make_scanner(json.JSONDecoder())
     with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
                    'w', encoding='utf-8') as result:
@@ -152,10 +175,10 @@ def capture_tool_context(codex_home, output):
                         errors.append({'source': name, 'line': ordinal,
                                        'reason': type(error).__name__})
                         continue
-                    kind = str(event.get('type'))
+                    kind = event['type']  # selected_event checked it is a str
                     counts[kind] = counts.get(kind, 0) + 1
                     if selected is not None:
-                        result.write(encode(selected) + '\n')
+                        result.write(join(iterencode(selected, 0)) + '\n')
                         retained += 1
             source_receipts.append({'source': name, 'sha256': digest.hexdigest(),
                                     'event_counts': counts})
@@ -174,5 +197,5 @@ def capture_tool_context(codex_home, output):
                  'internal passthrough are omitted. Authentication, configuration '
                  'and ambient environment are never copied by this capture.',
     }
-    (output / 'context-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+    (output / 'context-receipt.json').write_text(_indented_json(receipt) + '\n')
     return receipt
