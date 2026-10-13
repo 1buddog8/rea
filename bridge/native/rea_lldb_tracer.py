@@ -403,6 +403,10 @@ def _new_frame_location(names, key):
 # (load address, file address, symbol name) behind _location's other fields.
 _FRAME_MODULES = {}
 
+# (address, _frame_location entry) keyed by id(address) for backtrace frames;
+# each entry keeps its address alive so the id cannot be reused.
+_FRAME_ADDRESSES = {}
+
 
 def _no_files():
     return lldb.SBFileSpecList()
@@ -722,6 +726,7 @@ def _handle_breakpoint(context, frame, index):
         target = context["target"]
         frame_at = thread.GetFrameAtIndex
         frame_modules = _FRAME_MODULES
+        frame_addresses = _FRAME_ADDRESSES
         backtrace = record["backtrace"]
         append_location = backtrace.append
         # The journal row, joined once after the loop.
@@ -731,19 +736,28 @@ def _handle_breakpoint(context, frame, index):
             # _frame_location, with its cache-hit path inline.
             try:
                 address = frame_at(depth).GetPCAddress()
-                module = address.GetModule()
-                names = frame_modules.get(id(module))
-                if names is None:
-                    names = _frame_module_names(module)
-                symbol = address.GetSymbol()
-                key = (
-                    address.GetLoadAddress(target),
-                    address.GetFileAddress(),
-                    symbol.GetName() if symbol.IsValid() else None,
-                )
-                entry = names[3].get(key)
-                if entry is None:
-                    entry = _new_frame_location(names, key)
+                # The entry keeps the address alive, so a matching id is the
+                # same object.
+                cached = frame_addresses.get(id(address))
+                if cached is not None:
+                    entry = cached[1]
+                else:
+                    module = address.GetModule()
+                    names = frame_modules.get(id(module))
+                    if names is None:
+                        names = _frame_module_names(module)
+                    symbol = address.GetSymbol()
+                    key = (
+                        address.GetLoadAddress(target),
+                        address.GetFileAddress(),
+                        symbol.GetName() if symbol.IsValid() else None,
+                    )
+                    entry = names[3].get(key)
+                    if entry is None:
+                        entry = _new_frame_location(names, key)
+                    if len(frame_addresses) >= _LOCATION_SIZES_LIMIT:
+                        frame_addresses.clear()
+                    frame_addresses[id(address)] = (address, entry)
             except ValueError:
                 return "resource-limit"
             if entry[1] + record_bytes >= available_bytes:
