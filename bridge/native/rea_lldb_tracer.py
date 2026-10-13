@@ -531,6 +531,7 @@ def _breakpoint_report(target, created, config):
     locations_truncated = False
     specs = config["breakpoints"]
     dumps = json.dumps
+    location_sizes = {}
     for index, breakpoints in enumerate(created):
         locations = []
         count = 0
@@ -554,11 +555,22 @@ def _breakpoint_report(target, created, config):
                     remaining_bytes = (
                         MAX_BREAKPOINT_LOCATION_BYTES - retained_location_bytes
                     )
-                    if _estimated_location_size(location) > remaining_bytes:
+                    # Locations repeat across breakpoints; size each one once.
+                    key = tuple(location.values())
+                    sizes = location_sizes.get(key)
+                    if sizes is None:
+                        estimate = _estimated_location_size(location)
+                        # json.dumps escapes non-ASCII, so characters are bytes.
+                        sizes = location_sizes[key] = (
+                            estimate,
+                            len(dumps(location))
+                            if estimate <= MAX_BREAKPOINT_LOCATION_BYTES
+                            else None,
+                        )
+                    if sizes[0] > remaining_bytes:
                         locations_truncated = True
                         continue
-                    # json.dumps escapes non-ASCII, so characters are bytes.
-                    location_bytes = len(dumps(location))
+                    location_bytes = sizes[1]
                     addition = location_bytes + (1 if locations else 0)
                     if addition > remaining_bytes:
                         locations_truncated = True
