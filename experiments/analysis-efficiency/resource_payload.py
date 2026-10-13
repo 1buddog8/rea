@@ -56,49 +56,49 @@ def read_observation(path, token):
         # Decoded JSON only yields exact dict, list, str, int and bool types.
         if type(value) is not dict:
             return None
-        get = value.get
-        owner = get('ownership_token')
+        owner = value.get('ownership_token')
         if owner != token:
             return None
-        phase = get('phase')
+        # Every remaining field is required; a missing key raises KeyError.
+        phase = value['phase']
         if phase != 'payload-exited-observer-alive':
             return None
-        group = get('control_group')
+        group = value['control_group']
         if type(group) is not str or not group:
             return None
-        code = get('payload_exit_code')
-        pid = get('observer_pid')
-        peak = get('memory_peak_bytes')
+        code = value['payload_exit_code']
+        pid = value['observer_pid']
+        peak = value['memory_peak_bytes']
         if type(code) is not int or type(pid) is not int or type(peak) is not int:
             return None
         if pid <= 0 or peak < 0:
             return None
-        actors = get('remaining_processes')
+        actors = value['remaining_processes']
         if type(actors) is not list:
             return None
         for x in actors:
             if type(x) is not int or x <= 0:
                 return None
-        verified = get('payload_cleanup_verified')
+        verified = value['payload_cleanup_verified']
         if type(verified) is not bool or verified != (actors == [pid]):
             return None
-        events = get('resource_events')
+        events = value['resource_events']
         if type(events) is not dict:
             return None
-        memory = events.get('memory.events')
+        memory = events['memory.events']
         if (type(memory) is not dict or 'high' not in memory or 'max' not in memory
                 or 'oom' not in memory or 'oom_kill' not in memory):
             return None
         for x in memory.values():
             if type(x) is not int or x < 0:
                 return None
-        tasks = events.get('pids.events')
+        tasks = events['pids.events']
         if type(tasks) is not dict or 'max' not in tasks:
             return None
         for x in tasks.values():
             if type(x) is not int or x < 0:
                 return None
-        cpu = get('cpu_stat')
+        cpu = value['cpu_stat']
         if type(cpu) is not dict or 'usage_usec' not in cpu:
             return None
         for x in cpu.values():
@@ -111,7 +111,7 @@ def read_observation(path, token):
             'cpu_stat': cpu, 'memory_peak_bytes': peak, 'control_group': group,
             'resource_events': {'memory.events': memory, 'pids.events': tasks},
         }
-    except (OSError, ValueError, TypeError, StopIteration):
+    except (OSError, ValueError, TypeError, StopIteration, KeyError):
         return None
 
 
