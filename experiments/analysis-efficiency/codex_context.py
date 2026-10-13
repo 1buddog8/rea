@@ -149,6 +149,9 @@ def capture_tool_context(codex_home, output):
     iterencode = _event_encoder()
     join = ''.join
     scan_once = json.scanner.make_scanner(json.JSONDecoder())
+    # Decoding, selection and encoding depend only on the line bytes, so
+    # identical lines are processed once across all sources.
+    outcomes = {}
     with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
                    'w', encoding='utf-8') as result:
         for source in sources:
@@ -160,9 +163,6 @@ def capture_tool_context(codex_home, output):
                 data = handle.read()
             digest = hashlib.sha256(data)
             counts = {}
-            # Decoding, selection and encoding depend only on the line bytes,
-            # so identical lines within one source are processed once.
-            outcomes = {}
             with io.BytesIO(data) as lines:
                 for ordinal, line in enumerate(lines, 1):
                     outcome = outcomes.get(line)
