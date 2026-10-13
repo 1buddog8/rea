@@ -492,6 +492,8 @@ def _record_estimate(
     find_register = frame.FindRegister
     values = {}
     registers = []
+    # The encoded register objects, as _record_json would write them.
+    register_texts = []
     # _estimated_json_size of the registers list, built alongside it.
     registers_size = 2
     for position, name in enumerate(
@@ -510,6 +512,13 @@ def _record_estimate(
             value = "0x%x" % number
             registers.append({"name": name, "value": value})
             registers_size += 69 + 12 * (len(name) + len(value))
+            name_text = _REGISTER_NAME_TEXTS.get(name)
+            if name_text is None:
+                name_text = '{"name": %s, "value": ' % _encode_json_string(name)
+                if len(_REGISTER_NAME_TEXTS) < _LOCATION_SIZES_LIMIT:
+                    _REGISTER_NAME_TEXTS[name] = name_text
+            # Hex digits need no escaping.
+            register_texts.append(name_text + '"' + value + '"}')
     receiver_class = None
     selector = None
     if objc_method:
@@ -563,13 +572,14 @@ def _record_estimate(
         - 2
     )
     record.update(location)
-    return record, estimate
+    return record, estimate, ", ".join(register_texts)
 
 
-def _record_json(record, location_text):
+def _record_json(record, location_text, registers_text=None):
     """_encode_json(record) for a _record_estimate record whose backtrace is
     still empty, reusing location_text, the encoded location it was updated
-    with. Falls back to _encode_json for unexpected value types."""
+    with, and registers_text, the encoded registers it returned, if given.
+    Falls back to _encode_json for unexpected value types."""
     sequence = record["sequence"]
     elapsed = record["elapsed_ms"]
     thread_id = record["thread_id"]
@@ -587,19 +597,21 @@ def _record_json(record, location_text):
         or len(location_text) < 3
     ):
         return _encode_json(record)
-    parts = []
-    append = parts.append
-    for register in record["registers"]:
-        name = register["name"]
-        value = register["value"]
-        if type(name) is not str or type(value) is not str:
-            return _encode_json(record)
-        name_text = _REGISTER_NAME_TEXTS.get(name)
-        if name_text is None:
-            name_text = '{"name": %s, "value": ' % _encode_json_string(name)
-            if len(_REGISTER_NAME_TEXTS) < _LOCATION_SIZES_LIMIT:
-                _REGISTER_NAME_TEXTS[name] = name_text
-        append(name_text + _encode_json_string(value) + "}")
+    if registers_text is None:
+        parts = []
+        append = parts.append
+        for register in record["registers"]:
+            name = register["name"]
+            value = register["value"]
+            if type(name) is not str or type(value) is not str:
+                return _encode_json(record)
+            name_text = _REGISTER_NAME_TEXTS.get(name)
+            if name_text is None:
+                name_text = '{"name": %s, "value": ' % _encode_json_string(name)
+                if len(_REGISTER_NAME_TEXTS) < _LOCATION_SIZES_LIMIT:
+                    _REGISTER_NAME_TEXTS[name] = name_text
+            append(name_text + _encode_json_string(value) + "}")
+        registers_text = ", ".join(parts)
     return (
         '{"sequence": %s, "elapsed_ms": %s, "thread_id": %s, '
         '"breakpoint_index": %s, "receiver_class": %s, "selector": %s, '
@@ -611,7 +623,7 @@ def _record_json(record, location_text):
             int.__repr__(index),
             "null" if receiver_class is None else _encode_json_string(receiver_class),
             "null" if selector is None else _encode_json_string(selector),
-            ", ".join(parts),
+            registers_text,
             location_text[1:],
         )
     )
@@ -664,14 +676,14 @@ def _handle_breakpoint(context, frame, index):
     except ValueError:
         return "resource-limit"
     if result is not None:
-        record, estimate = result
+        record, estimate, registers_text = result
         if estimate > remaining_bytes:
             return "resource-limit"
         # json.dumps escapes non-ASCII, so characters are bytes.
         location_text = top_entry[2]
         if location_text is None:
             location_text = top_entry[2] = _encode_json(location)
-        record_text = _record_json(record, location_text)
+        record_text = _record_json(record, location_text, registers_text)
         record_bytes = len(record_text)
         available_bytes = MAX_TRACE_BYTES - context["retained_trace_bytes"]
         if record_bytes > available_bytes:
@@ -691,10 +703,10 @@ def _handle_breakpoint(context, frame, index):
             location_text = entry[2]
             if location_text is None:
                 location_text = entry[2] = _encode_json(location)
+            # The estimate bounds len(location_text), so the check above
+            # already admits this addition.
             location_bytes = len(location_text)
             addition = location_bytes + 1 if backtrace else location_bytes
-            if record_bytes + addition > available_bytes:
-                return "resource-limit"
             backtrace.append(location)
             backtrace_texts.append(location_text)
             record_bytes += addition
