@@ -48,8 +48,10 @@ def read_observation(path, token):
             return None
         # Same acceptance as _DECODER.decode without its two Python-level frames.
         text = path.read_text()
-        value, end = _SCAN(text, _WHITESPACE(text, 0).end())
-        if _WHITESPACE(text, end).end() != len(text):
+        # Skip the regex when there is no surrounding whitespace to match.
+        value, end = _SCAN(text, 0 if text[:1] not in ' \t\n\r' else _WHITESPACE(text, 0).end())
+        size = len(text)
+        if end != size and _WHITESPACE(text, end).end() != size:
             return None
         # Decoded JSON only yields exact dict, list, str, int and bool types.
         if type(value) is not dict:
