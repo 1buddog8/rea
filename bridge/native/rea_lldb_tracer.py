@@ -56,12 +56,25 @@ def _estimated_json_size(value):
     if value is None or isinstance(value, (bool, int, float)):
         return 32
     if isinstance(value, dict):
-        return 2 + sum(
-            len(key) * 6 + 4 + _estimated_json_size(item)
-            for key, item in value.items()
-        )
+        size = 2
+        for key, item in value.items():
+            size += len(key) * 6 + 4
+            kind = type(item)
+            if kind is str:
+                size += len(item) * 12 + 2
+            elif item is None or kind is int:
+                size += 32
+            else:
+                size += _estimated_json_size(item)
+        return size
     if isinstance(value, (list, tuple)):
-        return 2 + sum(_estimated_json_size(item) + 1 for item in value)
+        size = 2
+        for item in value:
+            if type(item) is dict:
+                size += _estimated_location_size(item) + 1
+            else:
+                size += _estimated_json_size(item) + 1
+        return size
     return 64
 
 
@@ -384,7 +397,7 @@ def _record(context, thread, frame, index, sequence, location, remaining_bytes):
         if symbol.startswith("-["):
             receiver_class = _dynamic_class(target, values[names[0]])
     estimated_base = (
-        _estimated_json_size(location)
+        _estimated_location_size(location)
         + _estimated_json_size(receiver_class)
         + _estimated_json_size(selector)
         + 2048
@@ -442,7 +455,8 @@ def _handle_breakpoint(context, frame, index):
     if record is not None:
         if not _fits_trace_budget(record, remaining_bytes):
             return "resource-limit"
-        record_bytes = len(json.dumps(record).encode("utf-8"))
+        # json.dumps escapes non-ASCII, so characters are bytes.
+        record_bytes = len(json.dumps(record))
         if context["retained_trace_bytes"] + record_bytes > MAX_TRACE_BYTES:
             return "resource-limit"
         for depth in range(1, frame_count + 1):
@@ -453,11 +467,11 @@ def _handle_breakpoint(context, frame, index):
             except ValueError:
                 return "resource-limit"
             if (
-                _estimated_json_size(location) + record_bytes + 1
+                _estimated_location_size(location) + record_bytes + 1
                 > MAX_TRACE_BYTES - context["retained_trace_bytes"]
             ):
                 return "resource-limit"
-            location_bytes = len(json.dumps(location).encode("utf-8"))
+            location_bytes = len(json.dumps(location))
             addition = location_bytes + (1 if record["backtrace"] else 0)
             if (
                 context["retained_trace_bytes"]
