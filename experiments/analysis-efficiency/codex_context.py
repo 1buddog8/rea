@@ -9,8 +9,8 @@ def token_counts(value):
     if not isinstance(value, dict):
         raise ValueError('Expected a token-count object')
     result = {}
-    for key in ['input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
-                'output_tokens', 'reasoning_output_tokens', 'total_tokens']:
+    for key in ('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
+                'output_tokens', 'reasoning_output_tokens', 'total_tokens'):
         if key in value:
             count = value[key]
             if not isinstance(count, int) or isinstance(count, bool) or count < 0:
@@ -21,46 +21,53 @@ def token_counts(value):
 
 def selected_event(event):
     """Select observed items; these are not the exact submitted model request."""
-    if not isinstance(event, dict) or not isinstance(event.get('payload'), dict):
+    if not isinstance(event, dict):
         raise ValueError('Expected an event object with an object payload')
-    if not isinstance(event.get('type'), str):
-        raise ValueError('Expected an event type string')
-    if event.get('timestamp') is not None and not isinstance(event['timestamp'], str):
-        raise ValueError('Expected a timestamp string or omission')
-    payload = event['payload']
+    payload = event.get('payload')
+    if not isinstance(payload, dict):
+        raise ValueError('Expected an event object with an object payload')
     kind = event.get('type')
-    if kind == 'response_item' and payload.get('type') in [
-        'custom_tool_call', 'custom_tool_call_output',
-        'function_call', 'function_call_output',
-    ]:
-        keys = ['type', 'call_id', 'name', 'input', 'arguments', 'output']
-    elif kind == 'token_usage_record':
-        keys = ['response_id', 'usage', 'turn_token_usage', 'thread_token_usage']
-        payload = {key: token_counts(payload[key]) if key != 'response_id'
-                   else payload[key] for key in keys if key in payload}
-    elif kind == 'event_msg' and payload.get('type') == 'token_count':
-        keys = ['type', 'info']
+    if not isinstance(kind, str):
+        raise ValueError('Expected an event type string')
+    timestamp = event.get('timestamp')
+    if timestamp is not None and not isinstance(timestamp, str):
+        raise ValueError('Expected a timestamp string or omission')
+    if kind == 'response_item':
+        if payload.get('type') not in (
+            'custom_tool_call', 'custom_tool_call_output',
+            'function_call', 'function_call_output',
+        ):
+            return None
+        selected = {}
+        for key in ('type', 'call_id', 'name', 'input', 'arguments', 'output'):
+            if key in payload:
+                selected[key] = payload[key]
+        return {'timestamp': timestamp, 'type': kind, 'payload': selected}
+    if kind == 'token_usage_record':
+        selected = {}
+        if 'response_id' in payload:
+            selected['response_id'] = payload['response_id']
+        for key in ('usage', 'turn_token_usage', 'thread_token_usage'):
+            if key in payload:
+                selected[key] = token_counts(payload[key])
+        return {'timestamp': timestamp, 'type': kind, 'payload': selected}
+    if kind == 'event_msg' and payload.get('type') == 'token_count':
         info = payload.get('info')
         if info is not None:
             if not isinstance(info, dict):
                 raise ValueError('Expected token-count info')
-            selected_info = {key: token_counts(info[key]) for key in
-                             ['total_token_usage', 'last_token_usage'] if key in info}
-            window = info.get('model_context_window')
+            selected_info = {}
+            for key in ('total_token_usage', 'last_token_usage'):
+                if key in info:
+                    selected_info[key] = token_counts(info[key])
             if 'model_context_window' in info:
+                window = info['model_context_window']
                 if window is not None and (not isinstance(window, int) or isinstance(window, bool) or window <= 0):
                     raise ValueError('Expected a positive model context window')
                 selected_info['model_context_window'] = window
-            payload = {'type': 'token_count', 'info': selected_info}
-        else:
-            payload = {'type': 'token_count', 'info': None}
-    else:
-        return None
-    return {
-        'timestamp': event.get('timestamp'),
-        'type': kind,
-        'payload': {key: payload[key] for key in keys if key in payload},
-    }
+            info = selected_info
+        return {'timestamp': timestamp, 'type': kind, 'payload': {'type': 'token_count', 'info': info}}
+    return None
 
 
 def capture_tool_context(codex_home, output):
