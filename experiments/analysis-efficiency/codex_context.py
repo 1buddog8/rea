@@ -13,7 +13,8 @@ def token_counts(value):
                 'output_tokens', 'reasoning_output_tokens', 'total_tokens'):
         if key in value:
             count = value[key]
-            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            if (type(count) is not int and (not isinstance(count, int) or isinstance(count, bool))
+                    or count < 0):
                 raise ValueError('Expected nonnegative integer token counts')
             result[key] = count
     return result
