@@ -570,6 +570,9 @@ def _breakpoint_report(target, created, config):
     specs = config["breakpoints"]
     dumps = json.dumps
     location_sizes = {}
+    # Breakpoints often share address objects; resolve each one once. The
+    # entry keeps the address alive so its id cannot be reused in this call.
+    resolved = {}
     for index, breakpoints in enumerate(created):
         locations = []
         count = 0
@@ -583,7 +586,13 @@ def _breakpoint_report(target, created, config):
         for breakpoint in breakpoints:
             for position in range(breakpoint.GetNumLocations()):
                 address = breakpoint.GetLocationAtIndex(position).GetAddress()
-                location = _location(address, target)
+                entry = resolved.get(id(address))
+                if entry is None or entry[0] is not address:
+                    entry = resolved[id(address)] = (
+                        address,
+                        _location(address, target),
+                    )
+                location = entry[1]
                 if required_prefix is not None and not (
                     location["symbol"] or ""
                 ).startswith(required_prefix):
