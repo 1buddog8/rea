@@ -552,6 +552,54 @@ def _record_estimate(
     return record, estimate
 
 
+def _record_json(record, location_text):
+    """_encode_json(record) for a _record_estimate record whose backtrace is
+    still empty, reusing location_text, the encoded location it was updated
+    with. Falls back to _encode_json for unexpected value types."""
+    sequence = record["sequence"]
+    elapsed = record["elapsed_ms"]
+    thread_id = record["thread_id"]
+    index = record["breakpoint_index"]
+    receiver_class = record["receiver_class"]
+    selector = record["selector"]
+    if (
+        type(sequence) is not int
+        or type(thread_id) is not int
+        or type(index) is not int
+        or type(elapsed) not in (int, float)
+        or elapsed - elapsed != 0
+        or not (receiver_class is None or type(receiver_class) is str)
+        or not (selector is None or type(selector) is str)
+        or len(location_text) < 3
+    ):
+        return _encode_json(record)
+    parts = []
+    for register in record["registers"]:
+        name = register["name"]
+        value = register["value"]
+        if type(name) is not str or type(value) is not str:
+            return _encode_json(record)
+        parts.append(
+            '{"name": %s, "value": %s}'
+            % (_encode_json_string(name), _encode_json_string(value))
+        )
+    return (
+        '{"sequence": %s, "elapsed_ms": %s, "thread_id": %s, '
+        '"breakpoint_index": %s, "receiver_class": %s, "selector": %s, '
+        '"registers": [%s], "backtrace": [], %s'
+        % (
+            int.__repr__(sequence),
+            type(elapsed).__repr__(elapsed),
+            int.__repr__(thread_id),
+            int.__repr__(index),
+            "null" if receiver_class is None else _encode_json_string(receiver_class),
+            "null" if selector is None else _encode_json_string(selector),
+            ", ".join(parts),
+            location_text[1:],
+        )
+    )
+
+
 # One trace runs in each owned LLDB subprocess. Its callbacks execute at the
 # breakpoint before LLDB resumes, unlike snapshots of later public stop events.
 _TRACE_CONTEXT = None
@@ -563,9 +611,8 @@ def _handle_breakpoint(context, frame, index):
         raise RuntimeError("LLDB breakpoint callback did not supply a readable frame")
     thread = frame.GetThread()
     events = context["events"]
-    location, location_size = _frame_location(
-        frame.GetPCAddress(), context["target"]
-    )[:2]
+    top_entry = _frame_location(frame.GetPCAddress(), context["target"])
+    location, location_size = top_entry[0], top_entry[1]
     symbol = location["symbol"] or ""
     if not _wanted(context["config"]["breakpoints"][index], symbol):
         return None
@@ -600,7 +647,10 @@ def _handle_breakpoint(context, frame, index):
         if estimate > remaining_bytes:
             return "resource-limit"
         # json.dumps escapes non-ASCII, so characters are bytes.
-        record_text = _encode_json(record)
+        location_text = top_entry[2]
+        if location_text is None:
+            location_text = top_entry[2] = _encode_json(location)
+        record_text = _record_json(record, location_text)
         record_bytes = len(record_text)
         available_bytes = MAX_TRACE_BYTES - context["retained_trace_bytes"]
         if record_bytes > available_bytes:
