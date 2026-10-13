@@ -79,6 +79,7 @@ def capture_tool_context(codex_home, output):
     source_receipts = []
     errors = [{'source': 'sessions', 'reason': 'not_an_owned_directory'}] if blocked else []
     retained = 0
+    encode = json.JSONEncoder(ensure_ascii=False).encode
     with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
                    'w', encoding='utf-8') as result:
         for source in sources:
@@ -98,10 +99,10 @@ def capture_tool_context(codex_home, output):
                         errors.append({'source': name, 'line': ordinal,
                                        'reason': type(error).__name__})
                         continue
-                    kind = event.get('type')
-                    counts[str(kind)] = counts.get(str(kind), 0) + 1
+                    kind = str(event.get('type'))
+                    counts[kind] = counts.get(kind, 0) + 1
                     if selected is not None:
-                        result.write(json.dumps(selected, ensure_ascii=False) + '\n')
+                        result.write(encode(selected) + '\n')
                         retained += 1
             source_receipts.append({'source': name, 'sha256': digest.hexdigest(),
                                     'event_counts': counts})
