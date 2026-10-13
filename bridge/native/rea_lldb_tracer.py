@@ -584,6 +584,70 @@ def _report_location_sizes(location):
     return estimate, exact
 
 
+def _report_location(address, target, modules):
+    """_location and _report_location_sizes, with module work shared across
+    addresses of one module. The cache entry keeps the module alive so its id
+    cannot be reused."""
+    module = address.GetModule()
+    cached = modules.get(id(module))
+    if cached is None:
+        if module.IsValid():
+            file_spec = module.GetFileSpec()
+            module_name = file_spec.GetFilename()
+            module_path = str(file_spec)
+        else:
+            module_name = module_path = None
+        estimate = exact = 0
+        for item in (module_name, module_path):
+            if item is None:
+                estimate += 30
+                exact += 2
+            elif type(item) is str:
+                estimate += len(item) * 12
+                exact += len(_encode_json_string(item)) - 2
+            else:
+                estimate = None
+                break
+        cached = modules[id(module)] = (module, module_name, module_path, estimate, exact)
+    symbol = address.GetSymbol()
+    file_address = address.GetFileAddress()
+    load_address = "0x%x" % address.GetLoadAddress(target)
+    if file_address == lldb.LLDB_INVALID_ADDRESS:
+        file_address = None
+    else:
+        file_address = "0x%x" % file_address
+    symbol_name = symbol.GetName() if symbol.IsValid() else None
+    location = {
+        "load_address": load_address,
+        "file_address": file_address,
+        "module": cached[1],
+        "module_path": cached[2],
+        "symbol": symbol_name,
+    }
+    estimate = cached[3]
+    if estimate is None or not (symbol_name is None or type(symbol_name) is str):
+        estimate, exact = _report_location_sizes(location)
+        return location, estimate, exact
+    # Hexadecimal text is ASCII, so its JSON string adds exactly two quotes.
+    estimate += _LOCATION_KEYS_ESTIMATE + len(load_address) * 12
+    exact = _LOCATION_KEYS_JSON_SIZE + cached[4] + len(load_address)
+    if file_address is None:
+        estimate += 30
+        exact += 2
+    else:
+        estimate += len(file_address) * 12
+        exact += len(file_address)
+    if symbol_name is None:
+        estimate += 30
+        exact += 2
+    else:
+        estimate += len(symbol_name) * 12
+        exact += len(_encode_json_string(symbol_name)) - 2
+    if estimate > MAX_BREAKPOINT_LOCATION_BYTES:
+        return location, estimate, None
+    return location, estimate, exact
+
+
 def _breakpoint_report(target, created, config):
     report = []
     remaining_bytes = MAX_BREAKPOINT_LOCATION_BYTES
@@ -593,6 +657,7 @@ def _breakpoint_report(target, created, config):
     # The entry keeps the address alive so its id cannot be reused in this call.
     resolved = {}
     resolved_get = resolved.get
+    modules = {}
     for index, breakpoints in enumerate(created):
         locations = []
         count = 0
@@ -618,30 +683,37 @@ def _breakpoint_report(target, created, config):
                 # same object.
                 entry = resolved_get(id(address))
                 if entry is None:
-                    location = _location(address, target)
-                    estimate, exact = _report_location_sizes(location)
+                    location, estimate, exact = _report_location(
+                        address, target, modules
+                    )
                     entry = resolved[id(address)] = (
                         address,
                         location,
                         estimate,
                         exact,
-                        location["symbol"] or "",
+                        # Every required prefix is two characters long.
+                        (location["symbol"] or "")[:2],
+                        # Bound for a location that follows a separator; an
+                        # unsized location already exceeds every budget.
+                        estimate if exact is None else max(estimate, exact + 1),
                     )
                 if required_prefix is not None:
-                    if not entry[4].startswith(required_prefix):
+                    if entry[4] != required_prefix:
                         continue
                     count += 1
                     if full:
                         continue
-                if entry[2] > remaining_bytes:
-                    locations_truncated = True
-                    continue
-                addition = entry[3] + 1 if locations else entry[3]
-                if addition > remaining_bytes:
-                    locations_truncated = True
-                    continue
+                if locations:
+                    if entry[5] > remaining_bytes:
+                        locations_truncated = True
+                        continue
+                    remaining_bytes -= entry[3] + 1
+                else:
+                    if entry[2] > remaining_bytes or entry[3] > remaining_bytes:
+                        locations_truncated = True
+                        continue
+                    remaining_bytes -= entry[3]
                 locations.append(entry[1])
-                remaining_bytes -= addition
                 if len(locations) >= MAX_REPORTED_LOCATIONS:
                     if required_prefix is None:
                         break
