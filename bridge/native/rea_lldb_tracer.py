@@ -462,6 +462,8 @@ def _read_register(frame, name):
 
 
 def _record(context, thread, frame, index, sequence, location, remaining_bytes):
+    if not _wanted(context["config"]["breakpoints"][index], location["symbol"] or ""):
+        return None
     result = _record_estimate(
         context,
         thread,
@@ -478,11 +480,9 @@ def _record(context, thread, frame, index, sequence, location, remaining_bytes):
 def _record_estimate(
     context, thread, frame, index, sequence, location, location_size, remaining_bytes
 ):
-    """(_record, its _estimated_json_size), or None for an unwanted symbol."""
+    """(_record, its _estimated_json_size) for a symbol already _wanted."""
     target, process, config = context["target"], context["process"], context["config"]
     symbol = location["symbol"] or ""
-    if not _wanted(config["breakpoints"][index], symbol):
-        return None
     names = ARGUMENT_REGISTERS.get(config["architecture"], [])
     objc_method = symbol.startswith("-[") or symbol.startswith("+[")
     values = {
@@ -508,8 +508,16 @@ def _record_estimate(
         selector = text if error.Success() and text else None
         if symbol.startswith("-["):
             receiver_class = _dynamic_class(target, values[names[0]])
-    receiver_class_size = _estimated_json_size(receiver_class)
-    selector_size = _estimated_json_size(selector)
+    receiver_class_size = (
+        len(receiver_class) * 12 + 2
+        if type(receiver_class) is str
+        else _estimated_json_size(receiver_class)
+    )
+    selector_size = (
+        len(selector) * 12 + 2
+        if type(selector) is str
+        else _estimated_json_size(selector)
+    )
     estimated_base = location_size + receiver_class_size + selector_size + 2048
     if estimated_base > remaining_bytes:
         raise ValueError("trace event exceeds aggregate byte budget")
@@ -529,10 +537,10 @@ def _record_estimate(
     # eight keys, 32 the float elapsed_ms and 2 the empty backtrace.
     estimate = (
         532
-        + _estimated_json_size(sequence)
+        + (32 if type(sequence) is int else _estimated_json_size(sequence))
         + 32
-        + _estimated_json_size(thread_id)
-        + _estimated_json_size(index)
+        + (32 if type(thread_id) is int else _estimated_json_size(thread_id))
+        + (32 if type(index) is int else _estimated_json_size(index))
         + receiver_class_size
         + selector_size
         + registers_size
