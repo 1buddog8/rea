@@ -568,7 +568,6 @@ def _breakpoint_report(target, created, config):
     retained_location_bytes = 0
     locations_truncated = False
     specs = config["breakpoints"]
-    dumps = json.dumps
     # Breakpoints often share address objects; resolve and size each one once.
     # The entry keeps the address alive so its id cannot be reused in this call.
     resolved = {}
@@ -604,7 +603,7 @@ def _breakpoint_report(target, created, config):
                         address,
                         location,
                         estimate,
-                        len(dumps(location))
+                        _location_json_size(location)
                         if estimate <= MAX_BREAKPOINT_LOCATION_BYTES
                         else None,
                         location["symbol"] or "",
