@@ -10,8 +10,6 @@ import time
 _DECODER = json.JSONDecoder()
 _SCAN = _DECODER.scan_once
 _WHITESPACE = json.decoder.WHITESPACE.match
-_REQUIRED_EVENTS = (('memory.events', ('high', 'max', 'oom', 'oom_kill')),
-                    ('pids.events', ('max',)))
 _OBSERVATION_NAMES = ('phase', 'ownership_token', 'payload_exit_code', 'observer_pid',
                       'remaining_processes', 'payload_cleanup_verified',
                       'cpu_stat', 'memory_peak_bytes', 'control_group')
@@ -53,55 +51,63 @@ def read_observation(path, token):
         value, end = _SCAN(text, _WHITESPACE(text, 0).end())
         if _WHITESPACE(text, end).end() != len(text):
             return None
-        if not isinstance(value, dict) or value.get('ownership_token') != token:
+        # Decoded JSON only yields exact dict, list, str, int and bool types.
+        if type(value) is not dict:
             return None
-        if value.get('phase') != 'payload-exited-observer-alive':
+        get = value.get
+        owner = get('ownership_token')
+        if owner != token:
             return None
-        if not isinstance(value.get('control_group'), str) or not value['control_group']:
+        phase = get('phase')
+        if phase != 'payload-exited-observer-alive':
             return None
-        for name in ('payload_exit_code', 'observer_pid', 'memory_peak_bytes'):
-            if type(value.get(name)) is not int:
-                return None
-        if value['observer_pid'] <= 0 or value['memory_peak_bytes'] < 0:
+        group = get('control_group')
+        if type(group) is not str or not group:
             return None
-        actors = value.get('remaining_processes')
-        if not isinstance(actors, list):
+        code = get('payload_exit_code')
+        pid = get('observer_pid')
+        peak = get('memory_peak_bytes')
+        if type(code) is not int or type(pid) is not int or type(peak) is not int:
+            return None
+        if pid <= 0 or peak < 0:
+            return None
+        actors = get('remaining_processes')
+        if type(actors) is not list:
             return None
         for x in actors:
             if type(x) is not int or x <= 0:
                 return None
-        if type(value.get('payload_cleanup_verified')) is not bool:
+        verified = get('payload_cleanup_verified')
+        if type(verified) is not bool or verified != (actors == [pid]):
             return None
-        if value['payload_cleanup_verified'] != (actors == [value['observer_pid']]):
+        events = get('resource_events')
+        if type(events) is not dict:
             return None
-        events = value.get('resource_events')
-        if not isinstance(events, dict):
+        memory = events.get('memory.events')
+        if (type(memory) is not dict or 'high' not in memory or 'max' not in memory
+                or 'oom' not in memory or 'oom_kill' not in memory):
             return None
-        for name, keys in _REQUIRED_EVENTS:
-            record = events.get(name)
-            if not isinstance(record, dict):
+        for x in memory.values():
+            if type(x) is not int or x < 0:
                 return None
-            for key in keys:
-                if key not in record:
-                    return None
-            for x in record.values():
-                if type(x) is not int or x < 0:
-                    return None
-        cpu = value.get('cpu_stat')
-        if not isinstance(cpu, dict) or 'usage_usec' not in cpu:
+        tasks = events.get('pids.events')
+        if type(tasks) is not dict or 'max' not in tasks:
+            return None
+        for x in tasks.values():
+            if type(x) is not int or x < 0:
+                return None
+        cpu = get('cpu_stat')
+        if type(cpu) is not dict or 'usage_usec' not in cpu:
             return None
         for x in cpu.values():
             if type(x) is not int or x < 0:
                 return None
         return {
-            'phase': value['phase'], 'ownership_token': value['ownership_token'],
-            'payload_exit_code': value['payload_exit_code'],
-            'observer_pid': value['observer_pid'], 'remaining_processes': actors,
-            'payload_cleanup_verified': value['payload_cleanup_verified'],
-            'cpu_stat': cpu, 'memory_peak_bytes': value['memory_peak_bytes'],
-            'control_group': value['control_group'],
-            'resource_events': {'memory.events': events['memory.events'],
-                                'pids.events': events['pids.events']},
+            'phase': phase, 'ownership_token': owner,
+            'payload_exit_code': code, 'observer_pid': pid, 'remaining_processes': actors,
+            'payload_cleanup_verified': verified,
+            'cpu_stat': cpu, 'memory_peak_bytes': peak, 'control_group': group,
+            'resource_events': {'memory.events': memory, 'pids.events': tasks},
         }
     except (OSError, ValueError, TypeError, StopIteration):
         return None
