@@ -492,33 +492,27 @@ def _handle_breakpoint(context, frame, index):
             return "resource-limit"
         # json.dumps escapes non-ASCII, so characters are bytes.
         record_bytes = len(json.dumps(record))
-        if context["retained_trace_bytes"] + record_bytes > MAX_TRACE_BYTES:
+        available_bytes = MAX_TRACE_BYTES - context["retained_trace_bytes"]
+        if record_bytes > available_bytes:
             return "resource-limit"
+        target = context["target"]
+        frame_at = thread.GetFrameAtIndex
+        backtrace = record["backtrace"]
         for depth in range(1, frame_count + 1):
             try:
-                location = _location(
-                    thread.GetFrameAtIndex(depth).GetPCAddress(), context["target"]
-                )
+                location = _location(frame_at(depth).GetPCAddress(), target)
             except ValueError:
                 return "resource-limit"
             sizes = _location_sizes(location)
-            if (
-                sizes[0] + record_bytes + 1
-                > MAX_TRACE_BYTES - context["retained_trace_bytes"]
-            ):
+            if sizes[0] + record_bytes + 1 > available_bytes:
                 return "resource-limit"
             location_bytes = sizes[1]
             if location_bytes is None:
                 location_bytes = sizes[1] = _location_json_size(location)
-            addition = location_bytes + (1 if record["backtrace"] else 0)
-            if (
-                context["retained_trace_bytes"]
-                + record_bytes
-                + addition
-                > MAX_TRACE_BYTES
-            ):
+            addition = location_bytes + 1 if backtrace else location_bytes
+            if record_bytes + addition > available_bytes:
                 return "resource-limit"
-            record["backtrace"].append(location)
+            backtrace.append(location)
             record_bytes += addition
         journal = context.get("observation_journal")
         if journal is not None and not journal.append(
