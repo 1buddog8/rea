@@ -27,27 +27,6 @@ def token_counts(value):
     return result
 
 
-def _select_token_counts(selected, source, keys):
-    """Store token_counts(source[key]) in selected for each present key, in one call."""
-    exact_type, integer = type, int
-    for key in keys:
-        if key in source:
-            value = source[key]
-            if not isinstance(value, dict):
-                raise ValueError('Expected a token-count object')
-            result = {}
-            for name in ('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
-                         'output_tokens', 'reasoning_output_tokens', 'total_tokens'):
-                if name in value:
-                    count = value[name]
-                    if (exact_type(count) is not integer
-                            and (not isinstance(count, int) or isinstance(count, bool))
-                            or count < 0):
-                        raise ValueError('Expected nonnegative integer token counts')
-                    result[name] = count
-            selected[key] = result
-
-
 def selected_event(event):
     """Select observed items; these are not the exact submitted model request."""
     if not isinstance(event, dict):
@@ -76,23 +55,45 @@ def selected_event(event):
         selected = {}
         if 'response_id' in payload:
             selected['response_id'] = payload['response_id']
-        _select_token_counts(selected, payload, ('usage', 'turn_token_usage', 'thread_token_usage'))
+        source, keys = payload, ('usage', 'turn_token_usage', 'thread_token_usage')
+    elif kind == 'event_msg' and payload.get('type') == 'token_count':
+        source = payload.get('info')
+        if source is None:
+            return {'timestamp': timestamp, 'type': kind, 'payload': {'type': 'token_count', 'info': None}}
+        if not isinstance(source, dict):
+            raise ValueError('Expected token-count info')
+        selected = {}
+        keys = ('total_token_usage', 'last_token_usage')
+    else:
+        return None
+    # Same selection as token_counts(source[key]) for each present key, inline.
+    exact_type, integer = type, int
+    for key in keys:
+        if key in source:
+            value = source[key]
+            if not isinstance(value, dict):
+                raise ValueError('Expected a token-count object')
+            result = {}
+            for name in ('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
+                         'output_tokens', 'reasoning_output_tokens', 'total_tokens'):
+                if name in value:
+                    count = value[name]
+                    if (exact_type(count) is not integer
+                            and (not isinstance(count, int) or isinstance(count, bool))
+                            or count < 0):
+                        raise ValueError('Expected nonnegative integer token counts')
+                    result[name] = count
+            selected[key] = result
+    if source is payload:
         return {'timestamp': timestamp, 'type': kind, 'payload': selected}
-    if kind == 'event_msg' and payload.get('type') == 'token_count':
-        info = payload.get('info')
-        if info is not None:
-            if not isinstance(info, dict):
-                raise ValueError('Expected token-count info')
-            selected_info = {}
-            _select_token_counts(selected_info, info, ('total_token_usage', 'last_token_usage'))
-            if 'model_context_window' in info:
-                window = info['model_context_window']
-                if window is not None and (not isinstance(window, int) or isinstance(window, bool) or window <= 0):
-                    raise ValueError('Expected a positive model context window')
-                selected_info['model_context_window'] = window
-            info = selected_info
-        return {'timestamp': timestamp, 'type': kind, 'payload': {'type': 'token_count', 'info': info}}
-    return None
+    if 'model_context_window' in source:
+        window = source['model_context_window']
+        if window is not None and (exact_type(window) is not integer
+                                   and (not isinstance(window, int) or isinstance(window, bool))
+                                   or window <= 0):
+            raise ValueError('Expected a positive model context window')
+        selected['model_context_window'] = window
+    return {'timestamp': timestamp, 'type': kind, 'payload': {'type': 'token_count', 'info': selected}}
 
 
 def _event_encoder():
