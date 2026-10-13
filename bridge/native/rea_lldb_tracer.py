@@ -111,6 +111,22 @@ def _location_json_size(location):
     return size
 
 
+_LOCATION_SIZES = {}
+_LOCATION_SIZES_LIMIT = 4096
+
+
+def _location_sizes(location):
+    """[estimated, exact or None] JSON sizes of one flat location, memoised by content."""
+    key = tuple(location.items())
+    sizes = _LOCATION_SIZES.get(key)
+    if sizes is None:
+        sizes = [_estimated_location_size(location), None]
+        if len(_LOCATION_SIZES) >= _LOCATION_SIZES_LIMIT:
+            _LOCATION_SIZES.clear()
+        _LOCATION_SIZES[key] = sizes
+    return sizes
+
+
 def _fits_trace_budget(value, remaining_bytes):
     return _estimated_json_size(value) <= remaining_bytes
 
@@ -485,12 +501,15 @@ def _handle_breakpoint(context, frame, index):
                 )
             except ValueError:
                 return "resource-limit"
+            sizes = _location_sizes(location)
             if (
-                _estimated_location_size(location) + record_bytes + 1
+                sizes[0] + record_bytes + 1
                 > MAX_TRACE_BYTES - context["retained_trace_bytes"]
             ):
                 return "resource-limit"
-            location_bytes = _location_json_size(location)
+            location_bytes = sizes[1]
+            if location_bytes is None:
+                location_bytes = sizes[1] = _location_json_size(location)
             addition = location_bytes + (1 if record["backtrace"] else 0)
             if (
                 context["retained_trace_bytes"]
