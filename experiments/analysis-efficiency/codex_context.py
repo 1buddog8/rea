@@ -82,7 +82,7 @@ def capture_tool_context(codex_home, output):
     errors = [{'source': 'sessions', 'reason': 'not_an_owned_directory'}] if blocked else []
     retained = 0
     encode = json.JSONEncoder(ensure_ascii=False).encode
-    decode = json.JSONDecoder().decode
+    scan_once = json.scanner.make_scanner(json.JSONDecoder())
     with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
                    'w', encoding='utf-8') as result:
         for source in sources:
@@ -100,7 +100,10 @@ def capture_tool_context(codex_home, output):
                         # A leading '{' followed by a nonzero byte is what
                         # json.detect_encoding resolves to plain UTF-8.
                         if line[:1] == b'{' and line[1:2] != b'\x00':
-                            event = decode(line.decode('utf-8', 'surrogatepass'))
+                            text = line.decode('utf-8', 'surrogatepass')
+                            event, end = scan_once(text, 0)
+                            if text[end:].strip(' \t\n\r'):
+                                raise json.JSONDecodeError('Extra data', text, end)
                         else:
                             event = json.loads(line)
                         selected = selected_event(event)
