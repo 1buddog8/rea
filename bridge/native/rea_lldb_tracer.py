@@ -90,6 +90,8 @@ def _estimated_location_size(location):
 
 
 _encode_json_string = json.encoder.encode_basestring_ascii
+# json.dumps with default arguments.
+_encode_json = json.JSONEncoder().encode
 
 
 def _location_json_size(location):
@@ -343,14 +345,19 @@ def _frame_location(address, target):
     frame address, memoised by the raw LLDB values. Entries are shared and
     must not be mutated."""
     module = address.GetModule()
+    names = _FRAME_MODULES.get(id(module))
+    if names is None:
+        if module.IsValid():
+            file_spec = module.GetFileSpec()
+            names = (module, file_spec.GetFilename(), str(file_spec))
+        else:
+            names = (module, None, None)
+        if len(_FRAME_MODULES) >= _LOCATION_SIZES_LIMIT:
+            _FRAME_MODULES.clear()
+        _FRAME_MODULES[id(module)] = names
+    module_name, module_path = names[1], names[2]
     symbol = address.GetSymbol()
     file_address = address.GetFileAddress()
-    if module.IsValid():
-        file_spec = module.GetFileSpec()
-        module_name = file_spec.GetFilename()
-        module_path = str(file_spec)
-    else:
-        module_name = module_path = None
     load_address = address.GetLoadAddress(target)
     symbol_name = symbol.GetName() if symbol.IsValid() else None
     key = (load_address, file_address, module_name, module_path, symbol_name)
@@ -374,6 +381,9 @@ def _frame_location(address, target):
 
 # Keyed by the raw address values and names behind _location's fields.
 _FRAME_LOCATIONS = {}
+# (module, filename, path) keyed by id(module); each entry keeps its module
+# alive so the id cannot be reused.
+_FRAME_MODULES = {}
 
 
 def _no_files():
@@ -582,7 +592,7 @@ def _handle_breakpoint(context, frame, index):
         if estimate > remaining_bytes:
             return "resource-limit"
         # json.dumps escapes non-ASCII, so characters are bytes.
-        record_text = json.dumps(record)
+        record_text = _encode_json(record)
         record_bytes = len(record_text)
         available_bytes = MAX_TRACE_BYTES - context["retained_trace_bytes"]
         if record_bytes > available_bytes:
@@ -601,7 +611,7 @@ def _handle_breakpoint(context, frame, index):
             location = entry[0]
             location_text = entry[2]
             if location_text is None:
-                location_text = entry[2] = json.dumps(location)
+                location_text = entry[2] = _encode_json(location)
             location_bytes = len(location_text)
             addition = location_bytes + 1 if backtrace else location_bytes
             if record_bytes + addition > available_bytes:
