@@ -152,6 +152,7 @@ def capture_tool_context(codex_home, output):
     # Decoding, selection and encoding depend only on the line bytes, so
     # identical lines are processed once across all sources.
     outcomes = {}
+    retained_digest = hashlib.sha256()
     with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
                    'wb') as result:
         for source in sources:
@@ -163,6 +164,8 @@ def capture_tool_context(codex_home, output):
                 data = handle.read()
             digest = hashlib.sha256(data)
             counts = {}
+            parts = []
+            write = parts.append
             with io.BytesIO(data) as lines:
                 for ordinal, line in enumerate(lines, 1):
                     outcome = outcomes.get(line)
@@ -174,7 +177,7 @@ def capture_tool_context(codex_home, output):
                             continue
                         counts[kind] = counts.get(kind, 0) + 1
                         if encoded is not None:
-                            result.write(encoded)
+                            write(encoded)
                             retained += 1
                         continue
                     try:
@@ -199,17 +202,17 @@ def capture_tool_context(codex_home, output):
                     if selected is not None:
                         # Encoded once as UTF-8 bytes, as the text writer would.
                         encoded = (join(iterencode(selected, 0)) + '\n').encode('utf-8')
-                        result.write(encoded)
+                        write(encoded)
                         retained += 1
                     else:
                         encoded = None
                     outcomes[line] = (None, kind, encoded)
+            # Retained events are written, and hashed, once per source.
+            chunk = b''.join(parts)
+            result.write(chunk)
+            retained_digest.update(chunk)
             source_receipts.append({'source': name, 'sha256': digest.hexdigest(),
                                     'event_counts': counts})
-    retained_digest = hashlib.sha256()
-    with target.open('rb') as captured:
-        for chunk in iter(lambda: captured.read(1024 * 1024), b''):
-            retained_digest.update(chunk)
     receipt = {
         'status': 'partial' if errors else 'captured' if source_receipts else 'unavailable',
         'retained_file': target.name,
