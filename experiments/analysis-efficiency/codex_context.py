@@ -153,7 +153,7 @@ def capture_tool_context(codex_home, output):
     # identical lines are processed once across all sources.
     outcomes = {}
     with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
-                   'w', encoding='utf-8') as result:
+                   'wb') as result:
         for source in sources:
             name = source.relative_to(codex_home).as_posix()
             if source.is_symlink() or not source.is_file():
@@ -197,7 +197,8 @@ def capture_tool_context(codex_home, output):
                     kind = event['type']  # selected_event checked it is a str
                     counts[kind] = counts.get(kind, 0) + 1
                     if selected is not None:
-                        encoded = join(iterencode(selected, 0)) + '\n'
+                        # Encoded once as UTF-8 bytes, as the text writer would.
+                        encoded = (join(iterencode(selected, 0)) + '\n').encode('utf-8')
                         result.write(encoded)
                         retained += 1
                     else:
