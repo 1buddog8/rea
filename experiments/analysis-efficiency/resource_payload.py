@@ -15,14 +15,25 @@ _OBSERVATION_NAMES = ('phase', 'ownership_token', 'payload_exit_code', 'observer
                       'cpu_stat', 'memory_peak_bytes', 'control_group')
 
 
+_COUNTERS = {}
+
+
 def pairs(path):
+    text = path.read_text()
+    # Parsing depends only on the counter text; reuse valid results for repeated reads.
+    cached = _COUNTERS.get(text)
+    if cached is not None:
+        return dict(cached)
     values = {}
-    for line in path.read_text().splitlines():
+    for line in text.splitlines():
         name, value = line.split()
         number = int(value)
         if number < 0 or name in values:
             raise ValueError('Invalid kernel counter')
         values[name] = number
+    if len(_COUNTERS) >= 1024:
+        _COUNTERS.clear()
+    _COUNTERS[text] = dict(values)
     return values
 
 
