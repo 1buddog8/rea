@@ -41,13 +41,43 @@ def snapshot(group, token, code):
     }
 
 
+_RECEIPTS = {}
+_RECEIPT_LIMIT = 1024
+
+
 def read_observation(path, token):
     """Validate the observer receipt; missing/malformed witnesses stay unknown."""
     try:
         if path.is_symlink():
             return None
-        # Same acceptance as _DECODER.decode without its two Python-level frames.
         text = path.read_text()
+        # Validation depends only on the receipt text; reuse it for repeated reads.
+        fields = _RECEIPTS.get(text, False)
+        if fields is False:
+            fields = _validated(text)
+            if len(_RECEIPTS) >= _RECEIPT_LIMIT:
+                _RECEIPTS.clear()
+            _RECEIPTS[text] = fields
+        if fields is None:
+            return None
+        owner, phase, code, pid, actors, verified, cpu, peak, group, memory, tasks = fields
+        if owner != token:
+            return None
+        return {
+            'phase': phase, 'ownership_token': owner,
+            'payload_exit_code': code, 'observer_pid': pid, 'remaining_processes': list(actors),
+            'payload_cleanup_verified': verified,
+            'cpu_stat': dict(cpu), 'memory_peak_bytes': peak, 'control_group': group,
+            'resource_events': {'memory.events': dict(memory), 'pids.events': dict(tasks)},
+        }
+    except (OSError, ValueError, TypeError, StopIteration, KeyError):
+        return None
+
+
+def _validated(text):
+    """Return the checked receipt fields, or None when the receipt is malformed."""
+    try:
+        # Same acceptance as _DECODER.decode without its two Python-level frames.
         # Skip the regex when there is no surrounding whitespace to match.
         value, end = _SCAN(text, 0 if text[:1] not in ' \t\n\r' else _WHITESPACE(text, 0).end())
         size = len(text)
@@ -57,8 +87,6 @@ def read_observation(path, token):
         if type(value) is not dict:
             return None
         owner = value.get('ownership_token')
-        if owner != token:
-            return None
         # Every remaining field is required; a missing key raises KeyError.
         phase = value['phase']
         if phase != 'payload-exited-observer-alive':
@@ -104,14 +132,8 @@ def read_observation(path, token):
         for x in cpu.values():
             if type(x) is not int or x < 0:
                 return None
-        return {
-            'phase': phase, 'ownership_token': owner,
-            'payload_exit_code': code, 'observer_pid': pid, 'remaining_processes': actors,
-            'payload_cleanup_verified': verified,
-            'cpu_stat': cpu, 'memory_peak_bytes': peak, 'control_group': group,
-            'resource_events': {'memory.events': memory, 'pids.events': tasks},
-        }
-    except (OSError, ValueError, TypeError, StopIteration, KeyError):
+        return owner, phase, code, pid, actors, verified, cpu, peak, group, memory, tasks
+    except (ValueError, TypeError, StopIteration, KeyError):
         return None
 
 
